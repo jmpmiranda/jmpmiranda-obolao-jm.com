@@ -1,0 +1,15 @@
+{
+  "name": "bolao-futebol",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bolão de futebol com grupos por código/senha e placares ao vivo automáticos",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
