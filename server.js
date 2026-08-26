@@ -152,11 +152,16 @@ async function buscarLiga(ligaId) {
     away: m.awayTeam?.name || "?",
     ha: m.homeTeam?.tla || (m.homeTeam?.shortName || "").slice(0, 3).toUpperCase(),
     aa: m.awayTeam?.tla || (m.awayTeam?.shortName || "").slice(0, 3).toUpperCase(),
+    haId: m.homeTeam?.id || null,
+    aaId: m.awayTeam?.id || null,
     haEscudo: m.homeTeam?.crest || null,
     aaEscudo: m.awayTeam?.crest || null,
     status: mapStatus(m.status),
     hs: m.score?.fullTime?.home ?? 0,
     as: m.score?.fullTime?.away ?? 0,
+    minuto: typeof m.minute === "number" ? m.minute : null,
+    acrescimo: typeof m.injuryTime === "number" ? m.injuryTime : null,
+    matchday: typeof m.matchday === "number" ? m.matchday : null,
     kickoff: m.utcDate,
   }));
   jogos.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
@@ -176,6 +181,53 @@ async function pollAll() {
     }
     await delay(1500); // espaça as chamadas pra não estourar o limite da API
   }
+}
+
+/* ---------------- tabela do campeonato (pra estimar probabilidade de vitória) ---------------- */
+
+const standingsCache = Object.fromEntries(LEAGUE_IDS.map((id) => [id, {}])); // ligaId -> { [teamId]: {pontos, jogos, saldoGols} }
+
+async function buscarTabela(ligaId) {
+  const meta = LEAGUE_META[ligaId];
+  if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
+  const url = `https://api.football-data.org/v4/competitions/${meta.code}/standings`;
+  const resp = await fetch(url, { headers: { "X-Auth-Token": API_KEY } });
+  if (!resp.ok) throw new Error(`standings respondeu ${resp.status}`);
+  const data = await resp.json();
+  const grupo = (data.standings || []).find((s) => s.type === "TOTAL") || (data.standings || [])[0];
+  const tabela = {};
+  for (const linha of (grupo?.table || [])) {
+    if (linha.team?.id) {
+      tabela[linha.team.id] = { pontos: linha.points, jogos: linha.playedGames, saldoGols: linha.goalDifference };
+    }
+  }
+  return tabela;
+}
+
+async function pollStandings() {
+  for (const ligaId of LEAGUE_IDS) {
+    try {
+      standingsCache[ligaId] = await buscarTabela(ligaId);
+    } catch (e) {
+      console.error(`erro ao buscar tabela ${ligaId}:`, e.message);
+    }
+    await delay(1500);
+  }
+}
+
+/* estimativa simples de probabilidade a partir da tabela (pontos por jogo + saldo de gols
+   por jogo + vantagem de mandante) — NÃO são odds reais de casa de apostas */
+function estimarProbabilidades(casa, fora) {
+  if (!casa || !fora || !casa.jogos || !fora.jogos) return null;
+  const forcaCasa = casa.pontos / casa.jogos + 0.12 * (casa.saldoGols / casa.jogos) + 0.35;
+  const forcaFora = fora.pontos / fora.jogos + 0.12 * (fora.saldoGols / fora.jogos);
+  const diff = forcaCasa - forcaFora;
+  const sig = 1 / (1 + Math.exp(-diff * 1.3));
+  const baseEmpate = Math.max(0.16, 0.26 - Math.abs(diff) * 0.05);
+  const pCasa = Math.round(sig * (1 - baseEmpate) * 100);
+  const pEmpate = Math.round(baseEmpate * 100);
+  const pFora = 100 - pCasa - pEmpate;
+  return { casa: pCasa, empate: pEmpate, fora: pFora };
 }
 
 /* registra, para cada grupo dessa liga, uma "foto" da classificação
@@ -216,11 +268,33 @@ app.post("/api/conta/criar", async (req, res) => {
   if (!nome || !nome.trim()) return res.status(400).json({ erro: "informe seu apelido" });
   const db = await loadDb();
   if (db.users[emailKey]) return res.status(409).json({ erro: "já existe uma conta com esse email" });
-  db.users[emailKey] = { senhaHash: hash(senha), nome: nome.trim(), foto: null, criadoEm: Date.now() };
+  const codigoRecuperacao = gerarCodigo() + gerarCodigo(); // 12 caracteres — só é mostrado essa uma vez
+  db.users[emailKey] = {
+    senhaHash: hash(senha), nome: nome.trim(), foto: null, criadoEm: Date.now(),
+    codigoRecuperacaoHash: hash(codigoRecuperacao),
+  };
   const token = gerarToken();
   db.sessions[token] = { email: emailKey, criadoEm: Date.now() };
   await saveDb(db);
-  res.json({ token, email: emailKey, nome: db.users[emailKey].nome });
+  res.json({ token, email: emailKey, nome: db.users[emailKey].nome, codigoRecuperacao });
+});
+
+app.post("/api/conta/recuperar", async (req, res) => {
+  const { email, codigoRecuperacao, novaSenha } = req.body || {};
+  const emailKey = String(email || "").trim().toLowerCase();
+  if (!novaSenha || novaSenha.length < 6) return res.status(400).json({ erro: "a nova senha precisa ter pelo menos 6 caracteres" });
+  const db = await loadDb();
+  const u = db.users[emailKey];
+  if (!u || !u.codigoRecuperacaoHash || u.codigoRecuperacaoHash !== hash(String(codigoRecuperacao || "").trim().toUpperCase())) {
+    return res.status(401).json({ erro: "email ou código de recuperação incorretos" });
+  }
+  u.senhaHash = hash(novaSenha);
+  // por segurança, derruba todas as sessões abertas dessa conta depois de trocar a senha
+  for (const [tok, sess] of Object.entries(db.sessions)) {
+    if (sess.email === emailKey) delete db.sessions[tok];
+  }
+  await saveDb(db);
+  res.json({ ok: true });
 });
 
 app.post("/api/conta/entrar", async (req, res) => {
@@ -283,7 +357,12 @@ app.get("/api/scores/:liga", (req, res) => {
   const liga = req.params.liga;
   if (!LEAGUE_META[liga]) return res.status(400).json({ erro: "liga inválida" });
   const c = scoresCache[liga];
-  res.json({ liga, meta: LEAGUE_META[liga], atualizadoEm: c.atualizadoEm, jogos: c.jogos, apiConfigurada: !!API_KEY });
+  const tabela = standingsCache[liga] || {};
+  const jogos = c.jogos.map((j) => ({
+    ...j,
+    probabilidade: estimarProbabilidades(tabela[j.haId], tabela[j.aaId]),
+  }));
+  res.json({ liga, meta: LEAGUE_META[liga], atualizadoEm: c.atualizadoEm, jogos, apiConfigurada: !!API_KEY });
 });
 
 /* ---------------- rotas de grupos ---------------- */
@@ -302,7 +381,7 @@ app.post("/api/grupos", autenticar, async (req, res) => {
     palpites: {}, historico: [], ultimoJogosEncerrados: -1,
   };
   await saveDb(db);
-  res.json({ code, nome, liga });
+  res.json({ code, nome, liga, souCriador: true });
 });
 
 app.post("/api/grupos/:code/entrar", autenticar, async (req, res) => {
@@ -323,14 +402,39 @@ app.post("/api/grupos/:code/entrar", autenticar, async (req, res) => {
     g.membros[req.userEmail] = { entrouEm: Date.now() };
     await saveDb(db);
   }
-  res.json({ code: req.params.code, nome: g.nome, liga: g.liga });
+  res.json({ code: req.params.code, nome: g.nome, liga: g.liga, souCriador: g.criadoPorEmail === req.userEmail });
 });
 
-app.get("/api/grupos/:code", async (req, res) => {
-  const db = await loadDb();
+app.get("/api/grupos/:code", autenticar, (req, res) => {
+  const g = req.db.groups[req.params.code];
+  if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  res.json({
+    code: req.params.code, nome: g.nome, liga: g.liga,
+    membros: Object.keys(g.membros).length,
+    souCriador: g.criadoPorEmail === req.userEmail,
+  });
+});
+
+app.post("/api/grupos/:code/sair", autenticar, async (req, res) => {
+  const db = req.db;
   const g = db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
-  res.json({ code: req.params.code, nome: g.nome, liga: g.liga, membros: Object.keys(g.membros).length });
+  delete g.membros[req.userEmail];
+  delete g.palpites[req.userEmail];
+  await saveDb(db);
+  res.json({ ok: true });
+});
+
+app.post("/api/grupos/:code/trocar-senha", autenticar, async (req, res) => {
+  const { novaSenha } = req.body || {};
+  const db = req.db;
+  const g = db.groups[req.params.code];
+  if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (g.criadoPorEmail !== req.userEmail) return res.status(403).json({ erro: "só quem criou o grupo pode trocar a senha" });
+  if (!novaSenha || novaSenha.length < 3) return res.status(400).json({ erro: "escolha uma senha" });
+  g.senhaHash = hash(novaSenha);
+  await saveDb(db);
+  res.json({ ok: true });
 });
 
 app.get("/api/grupos/:code/palpites", autenticar, (req, res) => {
@@ -350,6 +454,19 @@ app.post("/api/grupos/:code/palpites", autenticar, async (req, res) => {
   res.json({ ok: true });
 });
 
+/* acha a rodada (matchday) mais recente em que TODOS os jogos já terminaram */
+function ultimaRodadaCompleta(jogos) {
+  const porRodada = {};
+  for (const j of jogos) {
+    if (j.matchday == null) continue;
+    (porRodada[j.matchday] = porRodada[j.matchday] || []).push(j);
+  }
+  const completas = Object.keys(porRodada).map(Number).filter((md) => porRodada[md].every((j) => j.status === "final"));
+  if (completas.length === 0) return null;
+  const maior = Math.max(...completas);
+  return { matchday: maior, jogos: porRodada[maior] };
+}
+
 app.get("/api/grupos/:code/classificacao", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
@@ -363,7 +480,23 @@ app.get("/api/grupos/:code/classificacao", autenticar, (req, res) => {
     const email = l.slug;
     return { ...l, slug: idAnonimo(email), foto: (req.db.users[email] && req.db.users[email].foto) || null };
   });
-  res.json({ classificacao: linhas, meuId: idAnonimo(req.userEmail), atualizadoEm: scoresCache[g.liga]?.atualizadoEm || null });
+
+  let melhorRodada = null;
+  const rodada = ultimaRodadaCompleta(jogos);
+  if (rodada) {
+    const linhasRodada = Pontuacao.classificacao(membrosComNome, g.palpites, rodada.jogos);
+    if (linhasRodada.length > 0 && linhasRodada[0].total > 0) {
+      const top = linhasRodada[0];
+      melhorRodada = {
+        jogador: top.jogador,
+        pontos: top.total,
+        matchday: rodada.matchday,
+        foto: (req.db.users[top.slug] && req.db.users[top.slug].foto) || null,
+      };
+    }
+  }
+
+  res.json({ classificacao: linhas, meuId: idAnonimo(req.userEmail), melhorRodada, atualizadoEm: scoresCache[g.liga]?.atualizadoEm || null });
 });
 
 app.get("/api/grupos/:code/historico", autenticar, (req, res) => {
@@ -383,4 +516,6 @@ app.listen(PORT, () => {
   }
   pollAll();
   setInterval(pollAll, POLL_INTERVAL_MS);
+  pollStandings();
+  setInterval(pollStandings, 10 * 60 * 1000); // tabela muda pouco, atualiza a cada 10 min
 });
