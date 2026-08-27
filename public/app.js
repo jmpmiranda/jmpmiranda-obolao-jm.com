@@ -1,6 +1,6 @@
 /* Bolão — front-end (sem build, JS puro) */
 
-const LEAGUE_IDS_ORDEM = ["epl", "laliga", "seriea", "bundesliga", "ligue1"];
+const LEAGUE_IDS_ORDEM = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "champions", "brasileirao"];
 let LIGAS = {}; // preenchido via /api/ligas
 
 const state = {
@@ -26,6 +26,8 @@ const state = {
   graficoCache: {},
   statusPorJogo: {},
   editandoJogo: new Set(),
+  detalhesJogoAberto: null,
+  detalhesJogoCache: {},
   melhorRodada: null,
   codigoRecuperacaoParaMostrar: null,
   copiadoCodigoRecuperacao: false,
@@ -285,7 +287,7 @@ window.criarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set();
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -309,7 +311,7 @@ window.entrarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set();
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -328,7 +330,7 @@ window.abrirGrupoLocal = async function (code) {
   if (!entry) return;
   localStorage.setItem("bolao_ultimo_grupo", code);
   state.grupo = { code: entry.code, nome: entry.nome, liga: entry.liga, souCriador: false };
-  state.statusPorJogo = {}; state.editandoJogo = new Set();
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
   state.view = "bolao";
   state.abaBolao = "jogos";
   render();
@@ -347,7 +349,7 @@ window.trocarDeGrupo = function () {
   state.grupo = null;
   state.classificacao = [];
   state.scores = { jogos: [], atualizadoEm: null };
-  state.statusPorJogo = {}; state.editandoJogo = new Set();
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
   state.view = "home";
   render();
 };
@@ -766,6 +768,44 @@ function probabilidadeHtml(p, ha, aa) {
     </div>`;
 }
 
+window.toggleDetalhesJogo = async function (jogoId) {
+  if (state.detalhesJogoAberto === jogoId) { state.detalhesJogoAberto = null; render(); return; }
+  state.detalhesJogoAberto = jogoId;
+  render();
+  if (!state.detalhesJogoCache[jogoId]) {
+    try {
+      const r = await api(`/api/grupos/${state.grupo.code}/jogo/${jogoId}/palpites`);
+      state.detalhesJogoCache[jogoId] = r.linhas || [];
+    } catch (e) {
+      state.detalhesJogoCache[jogoId] = [];
+    }
+    render();
+  }
+};
+
+function montarDetalhesJogoHtml(linhas) {
+  if (!linhas) {
+    return `<div style="padding:12px;text-align:center" onclick="event.stopPropagation()"><span class="f-mono" style="font-size:11px;color:var(--ink-soft)">carregando…</span></div>`;
+  }
+  if (linhas.length === 0) {
+    return `<div style="padding:12px;text-align:center" onclick="event.stopPropagation()"><span class="f-mono" style="font-size:11px;color:var(--ink-soft)">ninguém nesse grupo ainda</span></div>`;
+  }
+  return `
+    <div style="margin-top:8px;padding-top:8px;border-top:1px dashed rgba(28,27,20,0.18)" onclick="event.stopPropagation()">
+      ${linhas.map((l) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 2px">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            ${avatarHtml(l.jogador, l.foto, 22)}
+            <span class="f-mono" style="font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.jogador}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+            <span class="f-score" style="font-size:17px;color:var(--ink-soft)">${l.palpite || "—"}</span>
+            <span class="f-mono" style="font-size:11px;font-weight:700;color:${l.pontos ? "var(--pitch)" : "var(--ink-soft)"}">${l.pontos != null ? l.pontos + " pts" : "—"}</span>
+          </div>
+        </div>`).join("")}
+    </div>`;
+}
+
 function statusJogoHtml(jogoId) {
   const s = state.statusPorJogo[jogoId];
   if (s === "salvando") return `<span class="f-mono" style="font-size:10px;color:var(--ink-soft)">💾 salvando…</span>`;
@@ -815,7 +855,11 @@ function cartaoJogo(g) {
         </div>
         ${bloqueado && pts && pts.tags.length ? `<div class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">${pts.tags.join(" · ")}</div>` : ""}
         ${bloqueado
-          ? `<div class="f-score" style="text-align:center;font-size:22px;color:var(--ink-soft);margin-top:4px">🔒 ${state.meusPalpites[g.id]?.h ?? "–"} – ${state.meusPalpites[g.id]?.a ?? "–"}</div>`
+          ? `<div onclick="toggleDetalhesJogo('${g.id}')" style="cursor:pointer;text-align:center;font-size:22px;color:var(--ink-soft);margin-top:4px">
+              <div class="f-score" style="font-size:22px">🔒 ${state.meusPalpites[g.id]?.h ?? "–"} – ${state.meusPalpites[g.id]?.a ?? "–"}</div>
+              <div class="f-mono" style="font-size:10px;color:var(--ink-soft);margin-top:2px">${state.detalhesJogoAberto === g.id ? "▾" : "▸"} ver palpite de todo mundo</div>
+            </div>
+            ${state.detalhesJogoAberto === g.id ? montarDetalhesJogoHtml(state.detalhesJogoCache[g.id]) : ""}`
           : editando
           ? `<div class="stepper" style="margin-top:4px">
               <button onclick="ajustarPalpite('${g.id}','h',-1)">−</button><span>${pick.h}</span><button onclick="ajustarPalpite('${g.id}','h',1)">+</button>
@@ -848,7 +892,7 @@ function abaJogos() {
         ${liga.country || ""} · ${proximos.length} jogo(s) a acontecer/em andamento ·
         ${state.scores.atualizadoEm ? `atualizado às ${new Date(state.scores.atualizadoEm).toLocaleTimeString("pt-BR")}` : "aguardando primeira atualização"}
       </p>
-      <p class="f-mono" style="font-size:10px;color:var(--ink-soft);margin:0 0 14px;opacity:.75">toque em Salvar em cada jogo pra confirmar o palpite (fica com bordinha verde) · toque em Alterar pra mudar até o jogo começar · a barrinha de % é uma estimativa baseada na tabela do campeonato, não é odds de casa de apostas</p>
+      <p class="f-mono" style="font-size:9px;color:var(--ink-soft);margin:0 0 14px;opacity:.6">estimativa de % baseada na tabela, não é odds de casa de apostas</p>
       ${avisoApi}
       ${proximos.length === 0
         ? `<p class="f-mono" style="color:var(--ink-soft);font-size:13px">Todos os jogos dessa rodada já terminaram — dá uma olhada na aba <b>Finalizados</b>.</p>`
@@ -905,7 +949,6 @@ function abaClassificacao() {
                   : ""}
               </div>`).join("")}
           </div>
-          <p class="f-mono" style="font-size:11px;color:var(--paper-soft);margin-top:6px;opacity:.75">toque no nome de alguém pra ver o gráfico de posição ao longo da temporada</p>
         `}
         <p class="f-mono" style="font-size:11px;color:rgba(251,248,239,0.55);margin-top:16px;line-height:1.5">
           placar exato = 8 pts · acertou o vencedor = 3 pts · + gols do vencedor certos = 3 · + gols do perdedor certos = 1 · + diferença de gols certa = 2 · empate certo (sem cravar) = 3
