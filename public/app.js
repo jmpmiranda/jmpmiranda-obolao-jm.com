@@ -26,6 +26,7 @@ const state = {
   graficoCache: {},
   statusPorJogo: {},
   editandoJogo: new Set(),
+  editandoDesde: {},
   detalhesJogoAberto: null,
   detalhesJogoCache: {},
   melhorRodada: null,
@@ -147,7 +148,23 @@ async function atualizarDadosBolao() {
       api(`/api/grupos/${state.grupo.code}/classificacao`),
     ]);
     state.scores = scores;
-    state.meusPalpites = meus.palpites || {};
+
+    // não deixa a atualização periódica apagar um palpite que a pessoa está mexendo
+    // mas ainda não salvou — só sobrescreve depois de 1 minuto sem salvar
+    const doServidor = meus.palpites || {};
+    const agora = Date.now();
+    const mesclado = { ...doServidor };
+    for (const jogoId of state.editandoJogo) {
+      const desde = state.editandoDesde[jogoId];
+      const dentroDoPrazo = desde && agora - desde < 60000;
+      if (dentroDoPrazo && state.meusPalpites[jogoId]) {
+        mesclado[jogoId] = state.meusPalpites[jogoId];
+      } else {
+        delete state.editandoDesde[jogoId];
+      }
+    }
+    state.meusPalpites = mesclado;
+
     state.classificacao = classi.classificacao || [];
     state.meuId = classi.meuId || null;
     state.melhorRodada = classi.melhorRodada || null;
@@ -287,7 +304,7 @@ window.criarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -311,7 +328,7 @@ window.entrarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -330,7 +347,7 @@ window.abrirGrupoLocal = async function (code) {
   if (!entry) return;
   localStorage.setItem("bolao_ultimo_grupo", code);
   state.grupo = { code: entry.code, nome: entry.nome, liga: entry.liga, souCriador: false };
-  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
   state.view = "bolao";
   state.abaBolao = "jogos";
   render();
@@ -349,7 +366,7 @@ window.trocarDeGrupo = function () {
   state.grupo = null;
   state.classificacao = [];
   state.scores = { jogos: [], atualizadoEm: null };
-  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
   state.view = "home";
   render();
 };
@@ -389,11 +406,13 @@ window.ajustarPalpite = function (jogoId, lado, delta) {
   const atual = state.meusPalpites[jogoId] || { h: 0, a: 0 };
   const novo = { ...atual, [lado]: Math.max(0, Math.min(9, (atual[lado] || 0) + delta)) };
   state.meusPalpites = { ...state.meusPalpites, [jogoId]: novo };
+  if (!state.editandoDesde[jogoId]) state.editandoDesde[jogoId] = Date.now();
   render();
 };
 
 window.alterarJogo = function (jogoId) {
   state.editandoJogo.add(jogoId);
+  state.editandoDesde[jogoId] = Date.now();
   state.statusPorJogo[jogoId] = "";
   render();
 };
@@ -433,6 +452,7 @@ window.salvarUmJogo = async function (jogoId) {
 
     state.statusPorJogo[jogoId] = sincronizados.length > 0 ? "sincronizado" : "salvo";
     state.editandoJogo.delete(jogoId);
+    delete state.editandoDesde[jogoId];
     render();
     const classi = await api(`/api/grupos/${state.grupo.code}/classificacao`);
     state.classificacao = classi.classificacao || [];
@@ -777,16 +797,20 @@ window.toggleDetalhesJogo = async function (jogoId) {
       const r = await api(`/api/grupos/${state.grupo.code}/jogo/${jogoId}/palpites`);
       state.detalhesJogoCache[jogoId] = r.linhas || [];
     } catch (e) {
-      state.detalhesJogoCache[jogoId] = [];
+      state.detalhesJogoCache[jogoId] = { erro: e.message || "não consegui carregar" };
     }
     render();
   }
 };
 
-function montarDetalhesJogoHtml(linhas) {
-  if (!linhas) {
+function montarDetalhesJogoHtml(dados) {
+  if (!dados) {
     return `<div style="padding:12px;text-align:center" onclick="event.stopPropagation()"><span class="f-mono" style="font-size:11px;color:var(--ink-soft)">carregando…</span></div>`;
   }
+  if (dados.erro) {
+    return `<div style="padding:12px;text-align:center" onclick="event.stopPropagation()"><span class="f-mono" style="font-size:11px;color:var(--live)">${dados.erro}</span></div>`;
+  }
+  const linhas = dados;
   if (linhas.length === 0) {
     return `<div style="padding:12px;text-align:center" onclick="event.stopPropagation()"><span class="f-mono" style="font-size:11px;color:var(--ink-soft)">ninguém nesse grupo ainda</span></div>`;
   }
