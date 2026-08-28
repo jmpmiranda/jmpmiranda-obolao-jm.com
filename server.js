@@ -28,6 +28,8 @@ const LEAGUE_META = {
   seriea: { name: "Serie A", flag: "🇮🇹", country: "Itália", code: "SA" },
   bundesliga: { name: "Bundesliga", flag: "🇩🇪", country: "Alemanha", code: "BL1" },
   ligue1: { name: "Ligue 1", flag: "🇫🇷", country: "França", code: "FL1" },
+  champions: { name: "Champions League", flag: "🏆", country: "Europa", code: "CL" },
+  brasileirao: { name: "Brasileirão Série A", flag: "🇧🇷", country: "Brasil", code: "BSA" },
 };
 const LEAGUE_IDS = Object.keys(LEAGUE_META);
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -139,7 +141,7 @@ async function buscarLiga(ligaId) {
   const meta = LEAGUE_META[ligaId];
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const hoje = new Date();
-  const de = new Date(hoje); de.setDate(de.getDate() - 3);
+  const de = new Date(hoje); de.setDate(de.getDate() - 200); // pega praticamente a temporada inteira já jogada, pra aba Finalizados mostrar tudo
   const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
   const fmt = (d) => d.toISOString().slice(0, 10);
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
@@ -503,6 +505,31 @@ app.get("/api/grupos/:code/historico", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
   res.json({ historico: g.historico || [], meuId: idAnonimo(req.userEmail) });
+});
+
+/* mostra o palpite de cada pessoa do grupo num jogo específico — só depois que o jogo
+   começa (senão daria pra copiar o palpite de alguém antes de decidir o seu) */
+app.get("/api/grupos/:code/jogo/:jogoId/palpites", autenticar, (req, res) => {
+  const g = req.db.groups[req.params.code];
+  if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  const jogos = (scoresCache[g.liga] && scoresCache[g.liga].jogos) || [];
+  const jogo = jogos.find((j) => j.id === req.params.jogoId);
+  if (!jogo) return res.status(404).json({ erro: "jogo não encontrado" });
+  if (jogo.status === "scheduled") return res.status(403).json({ erro: "os palpites só aparecem depois que o jogo começa" });
+
+  const linhas = Object.keys(g.membros).map((email) => {
+    const u = req.db.users[email];
+    const p = g.palpites[email] && g.palpites[email][req.params.jogoId];
+    const pontosObj = p ? Pontuacao.pointsFor(p, jogo) : null;
+    return {
+      jogador: u ? u.nome : "?",
+      foto: (u && u.foto) || null,
+      palpite: p ? `${p.h} – ${p.a}` : null,
+      pontos: pontosObj ? pontosObj.total : null,
+    };
+  });
+  linhas.sort((a, b) => (b.pontos ?? -1) - (a.pontos ?? -1));
+  res.json({ jogo: { home: jogo.home, away: jogo.away, hs: jogo.hs, as: jogo.as, status: jogo.status }, linhas });
 });
 
 app.get("*", (req, res) => {
