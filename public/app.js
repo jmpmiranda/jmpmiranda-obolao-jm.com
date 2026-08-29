@@ -139,7 +139,7 @@ function pararPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer =
 async function entrarNoBolao() {
   pararPolling();
   await atualizarDadosBolao();
-  pollTimer = setInterval(atualizarDadosBolao, 20000);
+  pollTimer = setInterval(atualizarDadosBolao, 15000);
 }
 
 async function atualizarDadosBolao() {
@@ -177,6 +177,12 @@ async function atualizarDadosBolao() {
       try {
         const r = await api(`/api/grupos/${state.grupo.code}/historico`);
         state.graficoCache[state.graficoAberto] = r.historico || [];
+      } catch { /* mantém cache */ }
+    }
+    if (state.detalhesJogoAberto) {
+      try {
+        const r = await api(`/api/grupos/${state.grupo.code}/jogo/${state.detalhesJogoAberto}/palpites`);
+        state.detalhesJogoCache[state.detalhesJogoAberto] = r.linhas || [];
       } catch { /* mantém cache */ }
     }
     render();
@@ -980,7 +986,7 @@ function abaClassificacao() {
           </div>
         `}
         <p class="f-mono" style="font-size:11px;color:rgba(251,248,239,0.55);margin-top:16px;line-height:1.5">
-          placar exato = 8 pts · acertou o vencedor = 3 pts · + gols do vencedor certos = 3 · + gols do perdedor certos = 1 · + diferença de gols certa = 2 · empate certo (sem cravar) = 3
+          placar exato = 8 pts · acertou o vencedor = 3 pts · + gols do vencedor certos = 3 · + gols do perdedor certos = 1 · + diferença de gols certa = 2 · empate certo (sem cravar) = 5
         </p>
       </div>
     </div>`;
@@ -988,7 +994,7 @@ function abaClassificacao() {
 
 const FAQ = [
   { p: "Os placares são realmente ao vivo?", r: "Sim. O servidor consulta uma API real de futebol automaticamente a cada ~90 segundos, sem precisar de clique." },
-  { p: "Como funciona a pontuação?", r: "Placar exato = 8 pontos. Acertar só quem venceu = 3 pontos, mais bônus por acertar os gols do vencedor (+3), do perdedor (+1) e a diferença (+2), que se somam entre si. Empate certo (sem cravar) = 3 pontos." },
+  { p: "Como funciona a pontuação?", r: "Placar exato = 8 pontos. Acertar só quem venceu = 3 pontos, mais bônus por acertar os gols do vencedor (+3), do perdedor (+1) e a diferença (+2), que se somam entre si. Empate certo (sem cravar) = 5 pontos (3 por acertar o empate + 2 pela diferença, que num empate é sempre 0)." },
   { p: "Como convido meus amigos pro grupo?", r: "Na tela do bolão, toque no código do grupo (no topo) para copiá-lo e mande junto com a senha." },
   { p: "Posso usar minha conta em mais de um celular?", r: "Sim! É só entrar com o mesmo email e senha em qualquer aparelho — seus grupos aparecem automaticamente." },
   { p: "Esqueci a senha do grupo, o que eu faço?", r: "Peça pra quem criou o grupo — só essa pessoa consegue trocar a senha do grupo, em Configurações → Trocar senha do grupo." },

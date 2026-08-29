@@ -14,7 +14,12 @@
     const realDraw = realDiff === 0;
     const pickDraw = pickDiff === 0;
 
-    if (realDraw) return pickDraw ? { total: 3, tags: ["empate certo"] } : { total: 0, tags: [] };
+    if (realDraw) {
+      if (!pickDraw) return { total: 0, tags: [] };
+      // acertou que ia empatar (+3) e, num empate, a diferença de gols é sempre 0×0 —
+      // ou seja, sempre bate também a diferença (+2), mesmo sem cravar o placar exato
+      return { total: 5, tags: ["empate certo", "diferença de gols"] };
+    }
     if (pickDraw) return { total: 0, tags: [] };
 
     const realWinnerHome = realDiff > 0;
