@@ -20,7 +20,7 @@ const DB_PATH = path.join(__dirname, "data", "db.json");
 const DB_KEY = "bolao_db";
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
-const POLL_INTERVAL_MS = 90 * 1000; // respeita o limite de 10 req/min do plano grátis
+const POLL_INTERVAL_MS = 60 * 1000; // mais rápido que antes (era 90s), ainda dentro do limite de 10 req/min do plano grátis
 
 const LEAGUE_META = {
   epl: { name: "Premier League", flag: "🏴", country: "Inglaterra", code: "PL" },
