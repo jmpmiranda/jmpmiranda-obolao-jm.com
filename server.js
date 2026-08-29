@@ -141,7 +141,7 @@ async function buscarLiga(ligaId) {
   const meta = LEAGUE_META[ligaId];
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const hoje = new Date();
-  const de = new Date(hoje); de.setDate(de.getDate() - 200); // pega praticamente a temporada inteira já jogada, pra aba Finalizados mostrar tudo
+  const de = new Date(hoje); de.setDate(de.getDate() - 3); // volta ao valor seguro (200 dias estourava algum limite da API e quebrava tudo)
   const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
   const fmt = (d) => d.toISOString().slice(0, 10);
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
