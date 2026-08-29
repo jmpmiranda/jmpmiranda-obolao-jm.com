@@ -31,6 +31,8 @@ const state = {
   detalhesJogoAberto: null,
   detalhesJogoCache: {},
   melhorRodada: null,
+  modoEscuro: localStorage.getItem("bolao_modo_escuro") === "1",
+  configMenuAberto: null,
   codigoRecuperacaoParaMostrar: null,
   copiadoCodigoRecuperacao: false,
   mensagemConta: "",
@@ -997,28 +999,74 @@ const FAQ = [
   { p: "Posso jogar em mais de um bolão ao mesmo tempo?", r: "Sim — sua conta pode participar de quantos grupos quiser. A tela inicial mostra 'Seus grupos' com todos eles, e dá pra sincronizar o palpite entre grupos da mesma liga em Configurações, pra não precisar apostar duas vezes." },
 ];
 
+function itemMenu(id, emoji, titulo, resumo, conteudoHtml) {
+  const aberto = state.configMenuAberto === id;
+  return `
+    <div style="border-bottom:1px solid rgba(28,27,20,0.1)">
+      <button onclick="toggleConfigMenu('${id}')" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:13px 4px;background:transparent;text-align:left;cursor:pointer">
+        <span class="f-display" style="font-size:14px;color:var(--ink)">${emoji} ${titulo}${resumo ? ` <span class="f-mono" style="font-size:11px;color:var(--ink-soft);font-weight:400">— ${resumo}</span>` : ""}</span>
+        <span style="color:var(--ink-soft);font-size:16px">${aberto ? "−" : "+"}</span>
+      </button>
+      ${aberto ? `<div style="padding:2px 4px 16px">${conteudoHtml}</div>` : ""}
+    </div>`;
+}
+
 function abaConfig() {
+  const outrosNaMesmaLiga = state.meusGrupos.filter((g) => g.code !== state.grupo.code && g.liga === state.grupo.liga);
+  const sincronizados = carregarSync();
+
   return `
     <div class="wrap" style="padding:18px 20px 40px">
       <h2 class="f-display" style="text-transform:uppercase;font-size:20px;color:var(--ink);margin:0 0 14px">⚙️ Configurações e ajuda</h2>
 
       <div class="card-panel" style="margin-bottom:16px">
-        <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 10px">MINHA CONTA</p>
-        <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
-          ${avatarHtml(state.conta.nome, state.conta.foto, 56)}
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:4px">
+          ${avatarHtml(state.conta.nome, state.conta.foto, 48)}
           <div>
-            <p class="f-display" style="font-size:16px;color:var(--ink);margin:0 0 2px">${state.conta.nome}</p>
-            <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 8px">${state.conta.email}</p>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--pitch)" onclick="selecionarFoto()" ${state.enviandoFoto ? "disabled" : ""}>
-                ${state.enviandoFoto ? "Enviando…" : (state.conta.foto ? "Trocar foto" : "Adicionar foto")}
-              </button>
-              <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--pitch)" onclick="editarApelido()">Trocar apelido</button>
-              <input id="input-foto" type="file" accept="image/*" style="display:none" onchange="onFotoSelecionada(this)" />
-            </div>
+            <p class="f-display" style="font-size:15px;color:var(--ink);margin:0 0 2px">${state.conta.nome}</p>
+            <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0">${state.conta.email}</p>
           </div>
         </div>
-        <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px">Grupo atual: <b style="color:var(--ink)">${state.grupo.nome}</b> (${state.grupo.code})${state.grupo.souCriador ? ` <span class="badge" style="background:var(--gold);color:var(--ink)">você criou</span>` : ""}</p>
+      </div>
+
+      <div class="card-panel" style="margin-bottom:16px;padding-top:4px;padding-bottom:4px">
+        ${itemMenu("foto", "📷", "Trocar foto", null, `
+          <div style="display:flex;align-items:center;gap:14px">
+            ${avatarHtml(state.conta.nome, state.conta.foto, 56)}
+            <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--pitch)" onclick="selecionarFoto()" ${state.enviandoFoto ? "disabled" : ""}>
+              ${state.enviandoFoto ? "Enviando…" : (state.conta.foto ? "Trocar foto" : "Adicionar foto")}
+            </button>
+            <input id="input-foto" type="file" accept="image/*" style="display:none" onchange="onFotoSelecionada(this)" />
+          </div>
+        `)}
+        ${itemMenu("apelido", "✏️", "Trocar apelido", state.conta.nome, `
+          <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--pitch)" onclick="editarApelido()">Trocar apelido</button>
+        `)}
+        ${itemMenu("escuro", "🌙", "Modo escuro", state.modoEscuro ? "ativado" : "desativado", `
+          <button class="chip f-display" style="text-transform:uppercase;font-size:12px;padding:8px 16px;background:${state.modoEscuro ? "var(--amber)" : "var(--paper-soft)"};color:var(--ink)" onclick="toggleModoEscuro()">
+            ${state.modoEscuro ? "☀️ Voltar pro modo claro" : "🌙 Ativar modo escuro"}
+          </button>
+        `)}
+        ${outrosNaMesmaLiga.length > 0 ? itemMenu("sync", "🔄", "Sincronizar palpites", `${sincronizados.length} ligado(s)`, `
+          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px">Marque outro grupo da mesma liga (${LIGAS[state.grupo.liga]?.name || ""}) pra salvar o mesmo palpite nos dois de uma vez só.</p>
+          ${outrosNaMesmaLiga.map((g) => `
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 2px;cursor:pointer">
+              <input type="checkbox" ${sincronizados.includes(g.code) ? "checked" : ""} onchange="toggleSyncGrupo('${g.code}')" style="width:16px;height:16px" />
+              <span class="f-mono" style="font-size:13px;color:var(--ink)">${g.nome} <span style="color:var(--ink-soft)">(${g.code})</span></span>
+            </label>`).join("")}
+        `) : ""}
+        ${itemMenu("duvidas", "❓", "Dúvidas frequentes", null, `
+          ${FAQ.map((item) => `
+            <div style="margin-bottom:10px">
+              <p class="f-display" style="font-size:13px;color:var(--ink);margin:0 0 2px">${item.p}</p>
+              <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0;line-height:1.5">${item.r}</p>
+            </div>`).join("")}
+        `)}
+      </div>
+
+      <div class="card-panel" style="margin-bottom:16px">
+        <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 10px">GRUPO ATUAL</p>
+        <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px"><b style="color:var(--ink)">${state.grupo.nome}</b> (${state.grupo.code})${state.grupo.souCriador ? ` <span class="badge" style="background:var(--gold);color:var(--ink)">você criou</span>` : ""}</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="trocarDeGrupo()">Trocar de grupo</button>
           ${state.grupo.souCriador ? `<button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="trocarSenhaGrupo()">Trocar senha do grupo</button>` : ""}
@@ -1026,22 +1074,6 @@ function abaConfig() {
           <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="sairDaConta()">Sair da conta</button>
         </div>
       </div>
-
-      ${(() => {
-        const outrosNaMesmaLiga = state.meusGrupos.filter((g) => g.code !== state.grupo.code && g.liga === state.grupo.liga);
-        if (outrosNaMesmaLiga.length === 0) return "";
-        const sincronizados = carregarSync();
-        return `
-          <div class="card-panel" style="margin-bottom:16px">
-            <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 6px">SINCRONIZAR PALPITES</p>
-            <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px">Marque outro grupo da mesma liga (${LIGAS[state.grupo.liga]?.name || ""}) pra salvar o mesmo palpite nos dois de uma vez só, sem precisar apostar duas vezes.</p>
-            ${outrosNaMesmaLiga.map((g) => `
-              <label style="display:flex;align-items:center;gap:10px;padding:8px 2px;cursor:pointer">
-                <input type="checkbox" ${sincronizados.includes(g.code) ? "checked" : ""} onchange="toggleSyncGrupo('${g.code}')" style="width:16px;height:16px" />
-                <span class="f-mono" style="font-size:13px;color:var(--ink)">${g.nome} <span style="color:var(--ink-soft)">(${g.code})</span></span>
-              </label>`).join("")}
-          </div>`;
-      })()}
 
       <div class="card-panel" style="margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -1068,7 +1100,7 @@ function abaConfig() {
         </a>
       </div>
 
-      <div class="card-panel" style="margin-bottom:16px">
+      <div class="card-panel">
         <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 10px">LEMBRETE DE PALPITE</p>
         ${statusNotificacao() === "granted" ? `
           <p class="f-mono" style="font-size:12px;color:var(--ink);margin:0">🔔 Ativado — você recebe um aviso 1h antes de cada jogo que ainda não palpitou.</p>
@@ -1082,17 +1114,19 @@ function abaConfig() {
         `}
         <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-top:10px;opacity:.8">funciona enquanto essa página estiver aberta no navegador.</p>
       </div>
-
-      <div class="card-panel">
-        <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 6px">DÚVIDAS FREQUENTES</p>
-        ${FAQ.map((item, i) => `
-          <div class="faq-item ${state.faqAberto === i ? "aberto" : ""}">
-            <button class="faq-pergunta" onclick="toggleFaq(${i})"><span>${item.p}</span><span>${state.faqAberto === i ? "−" : "+"}</span></button>
-            <div class="faq-resposta">${item.r}</div>
-          </div>`).join("")}
-      </div>
     </div>`;
 }
+window.toggleModoEscuro = function () {
+  state.modoEscuro = !state.modoEscuro;
+  localStorage.setItem("bolao_modo_escuro", state.modoEscuro ? "1" : "0");
+  render();
+};
+
+window.toggleConfigMenu = function (id) {
+  state.configMenuAberto = state.configMenuAberto === id ? null : id;
+  render();
+};
+
 window.toggleFaq = function (i) { state.faqAberto = state.faqAberto === i ? null : i; render(); };
 
 function telaBolao() {
@@ -1147,6 +1181,7 @@ function telaBolao() {
 /* ---------------- render principal ---------------- */
 
 function render() {
+  document.body.classList.toggle("tema-escuro", state.modoEscuro);
   const el = document.getElementById("app");
   if (state.view === "carregando") el.innerHTML = `<div class="center-screen f-mono" style="color:var(--paper-soft)">carregando bolão…</div>`;
   else if (state.view === "reconectando") el.innerHTML = `<div class="center-screen f-mono" style="color:var(--paper-soft);text-align:center;padding:20px">🔌 conectando ao servidor…<br/><span style="font-size:11px;opacity:.7">o servidor grátis às vezes demora uns segundos pra acordar</span></div>`;

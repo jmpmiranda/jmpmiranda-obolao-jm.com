@@ -2,6 +2,10 @@
   --pitch: #0E3B2E; --pitch-alt: #0A2F24; --paper: #F4EEDD; --paper-soft: #EFE7D0;
   --ink: #1C1B14; --ink-soft: #5B5645; --amber: #FFB100; --live: #E8452A; --gold: #C9A227; --white: #FBF8EF;
 }
+body.tema-escuro {
+  --paper: #1B2420; --paper-soft: #232E28;
+  --ink: #F1EDE0; --ink-soft: #ABA495;
+}
 * { box-sizing: border-box; }
 body { margin: 0; font-family: 'Inter', sans-serif; background: var(--pitch); }
 button, input { font-family: 'Inter', sans-serif; border: none; }
