@@ -27,6 +27,7 @@ const state = {
   statusPorJogo: {},
   editandoJogo: new Set(),
   editandoDesde: {},
+  palpitesConfirmados: new Set(),
   detalhesJogoAberto: null,
   detalhesJogoCache: {},
   melhorRodada: null,
@@ -164,6 +165,7 @@ async function atualizarDadosBolao() {
       }
     }
     state.meusPalpites = mesclado;
+    state.palpitesConfirmados = new Set(Object.keys(doServidor));
 
     state.classificacao = classi.classificacao || [];
     state.meuId = classi.meuId || null;
@@ -304,7 +306,7 @@ window.criarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -328,7 +330,7 @@ window.entrarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -347,7 +349,7 @@ window.abrirGrupoLocal = async function (code) {
   if (!entry) return;
   localStorage.setItem("bolao_ultimo_grupo", code);
   state.grupo = { code: entry.code, nome: entry.nome, liga: entry.liga, souCriador: false };
-  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
   state.view = "bolao";
   state.abaBolao = "jogos";
   render();
@@ -366,7 +368,7 @@ window.trocarDeGrupo = function () {
   state.grupo = null;
   state.classificacao = [];
   state.scores = { jogos: [], atualizadoEm: null };
-  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
   state.view = "home";
   render();
 };
@@ -453,6 +455,7 @@ window.salvarUmJogo = async function (jogoId) {
     state.statusPorJogo[jogoId] = sincronizados.length > 0 ? "sincronizado" : "salvo";
     state.editandoJogo.delete(jogoId);
     delete state.editandoDesde[jogoId];
+    state.palpitesConfirmados.add(jogoId);
     render();
     const classi = await api(`/api/grupos/${state.grupo.code}/classificacao`);
     state.classificacao = classi.classificacao || [];
@@ -646,7 +649,7 @@ function telaConta() {
       <div style="max-width:380px;margin:0 auto">
         <div style="text-align:center;margin-bottom:20px">
           <div style="font-size:26px">🎟️</div>
-          <h1 class="f-display" style="text-transform:uppercase;font-weight:700;font-size:30px;margin:4px 0 0;color:var(--white)">Bolão</h1>
+          <h1 class="f-display" style="font-weight:700;font-size:30px;margin:4px 0 0;color:var(--white)">ALLeagues</h1>
           <p class="f-mono" style="color:var(--paper-soft);font-size:12px;margin-top:4px">crie uma conta pra jogar em qualquer aparelho</p>
         </div>
 
@@ -723,7 +726,7 @@ function telaHome() {
       <div style="max-width:380px;margin:0 auto">
         <div style="text-align:center;margin-bottom:20px">
           <div style="font-size:26px">🏆</div>
-          <h1 class="f-display" style="text-transform:uppercase;font-weight:700;font-size:30px;margin:4px 0 0;color:var(--white)">Bolão</h1>
+          <h1 class="f-display" style="font-weight:700;font-size:30px;margin:4px 0 0;color:var(--white)">ALLeagues</h1>
           <p class="f-mono" style="color:var(--paper-soft);font-size:12px;margin-top:4px">e aí, <b style="color:var(--amber)">${state.conta.nome}</b> — crie ou entre num grupo</p>
         </div>
 
@@ -841,7 +844,7 @@ function cartaoJogo(g) {
   const bloqueado = g.status !== "scheduled";
   const pick = state.meusPalpites[g.id] || { h: 0, a: 0 };
   const pts = window.Pontuacao.pointsFor(state.meusPalpites[g.id], g);
-  const temPalpiteSalvo = Object.prototype.hasOwnProperty.call(state.meusPalpites, g.id);
+  const temPalpiteSalvo = state.palpitesConfirmados.has(g.id);
   const editando = !bloqueado && (state.editandoJogo.has(g.id) || !temPalpiteSalvo);
   let statusHtml;
   if (g.status === "live") {
@@ -1100,7 +1103,7 @@ function telaBolao() {
         <div class="wrap" style="padding:0;display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
           <div style="min-width:0">
             <div class="f-mono" style="color:var(--amber);font-size:11px;display:flex;align-items:center;gap:6px">🛡️ ${state.grupo.nome}</div>
-            <h1 class="f-display" style="text-transform:uppercase;font-weight:700;font-size:28px;margin:2px 0 0;color:var(--white)">Bolão</h1>
+            <h1 class="f-display" style="font-weight:700;font-size:28px;margin:2px 0 0;color:var(--white)">ALLeagues</h1>
             <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
               ${avatarHtml(state.conta.nome, state.conta.foto, 26)}
               <p class="f-mono" style="color:var(--paper-soft);font-size:11px;margin:0">jogando como <b style="color:var(--amber)">${state.conta.nome}</b></p>
