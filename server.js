@@ -141,7 +141,7 @@ async function buscarLiga(ligaId) {
   const meta = LEAGUE_META[ligaId];
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const hoje = new Date();
-  const de = new Date(hoje); de.setDate(de.getDate() - 3); // volta ao valor seguro (200 dias estourava algum limite da API e quebrava tudo)
+  const de = new Date(hoje); de.setDate(de.getDate() - 30); // aumento moderado (era 3) pra Finalizados mostrar mais jogos, sem repetir o erro dos 200 dias
   const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
   const fmt = (d) => d.toISOString().slice(0, 10);
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
@@ -235,7 +235,9 @@ function estimarProbabilidades(casa, fora) {
 /* registra, para cada grupo dessa liga, uma "foto" da classificação
    sempre que o número de jogos encerrados mudar — é isso que vira o gráfico */
 async function atualizarHistoricoDosGrupos(ligaId, jogos) {
-  const jogosEncerrados = jogos.filter((j) => j.status === "final").length;
+  const finalizados = jogos.filter((j) => j.status === "final").sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+  const jogosEncerrados = finalizados.length;
+  const ultimoJogo = finalizados.length > 0 ? finalizados[finalizados.length - 1] : null;
   const db = await loadDb();
   let mudou = false;
   for (const [code, g] of Object.entries(db.groups)) {
@@ -251,6 +253,7 @@ async function atualizarHistoricoDosGrupos(ligaId, jogos) {
     g.historico.push({
       jogosEncerrados,
       quando: Date.now(),
+      ultimoJogo: ultimoJogo ? `${ultimoJogo.ha}x${ultimoJogo.aa}` : null,
       linhas: linhas.map((l) => ({ slug: idAnonimo(l.slug), jogador: l.jogador, total: l.total, colocacao: l.colocacao })),
     });
     if (g.historico.length > 40) g.historico = g.historico.slice(-40);
