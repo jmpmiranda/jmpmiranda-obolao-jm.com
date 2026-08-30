@@ -583,7 +583,7 @@ function montarGraficoInline(historico, slug) {
   const pontos = (historico || [])
     .map((h) => {
       const l = h.linhas.find((x) => x.slug === slug);
-      return l ? { x: h.jogosEncerrados, y: l.colocacao, total: l.total } : null;
+      return l ? { x: h.jogosEncerrados, y: l.colocacao, total: l.total, rotulo: h.ultimoJogo || String(h.jogosEncerrados) } : null;
     })
     .filter(Boolean);
 
@@ -595,36 +595,40 @@ function montarGraficoInline(historico, slug) {
   }
 
   const maxRank = Math.max(...pontos.map((p) => p.y), 1);
-  const W = 720, H = 360, PAD = 46;
+  const W = 720, H = 400, PAD_L = 44, PAD_R = 26, PAD_TOP = 30, PAD_BOTTOM = 60;
   const minX = Math.min(...pontos.map((p) => p.x));
   const maxX = Math.max(...pontos.map((p) => p.x));
-  const sx = (x) => (maxX === minX ? W / 2 : PAD + ((x - minX) / (maxX - minX)) * (W - 2 * PAD));
-  const sy = (y) => PAD + ((y - 1) / Math.max(maxRank - 1, 1)) * (H - 2 * PAD);
+  const sx = (x) => (maxX === minX ? (PAD_L + (W - PAD_R)) / 2 : PAD_L + ((x - minX) / (maxX - minX)) * (W - PAD_L - PAD_R));
+  const sy = (y) => PAD_TOP + ((y - 1) / Math.max(maxRank - 1, 1)) * (H - PAD_TOP - PAD_BOTTOM);
 
+  const ultimo = pontos.length - 1;
   const path = pontos.map((p, i) => `${i === 0 ? "M" : "L"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
-  const circles = pontos.map((p) => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="6" fill="#FFB100" />`).join("");
-  const xLabels = pontos.map((p) => `<text x="${sx(p.x).toFixed(1)}" y="${H - 14}" font-size="13" text-anchor="middle" fill="#EFE7D0">${p.x}</text>`).join("");
+  const circles = pontos.map((p, i) =>
+    i === ultimo
+      ? `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="11" fill="rgba(255,177,0,0.28)" /><circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="6.5" fill="#FFB100" stroke="#FBF8EF" stroke-width="1.5" />`
+      : `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="4" fill="#8FD6AE" />`
+  ).join("");
+  // mostra no máximo ~7 rótulos no eixo X (todos os confrontos poluiria demais em rodadas longas)
+  const passo = Math.max(1, Math.ceil(pontos.length / 7));
+  const xLabels = pontos.map((p, i) => (i % passo === 0 || i === ultimo)
+    ? `<text x="${sx(p.x).toFixed(1)}" y="${H - PAD_BOTTOM + 22}" font-size="11" text-anchor="middle" fill="#EFE7D0">${p.rotulo}</text>`
+    : "").join("");
   let yLabels = "";
-  for (let r = 1; r <= maxRank; r++) yLabels += `<text x="10" y="${(sy(r) + 4).toFixed(1)}" font-size="13" fill="#EFE7D0">${r}º</text>`;
+  for (let r = 1; r <= maxRank; r++) yLabels += `<text x="8" y="${(sy(r) + 4).toFixed(1)}" font-size="12" fill="#EFE7D0">${r}º</text>`;
 
-  const primeira = pontos[0].y, ultima = pontos[pontos.length - 1].y;
-  const diff = primeira - ultima;
-  let resumo;
-  if (diff > 0) resumo = `⬆ subiu ${diff} posição${diff > 1 ? "ões" : ""} desde o início da temporada`;
-  else if (diff < 0) resumo = `⬇ caiu ${Math.abs(diff)} posição${Math.abs(diff) > 1 ? "ões" : ""} desde o início da temporada`;
-  else resumo = "➡ manteve a posição desde o início da temporada";
-
-  return `<div style="padding:16px 18px 20px;background:rgba(0,0,0,0.15);border-radius:10px;margin:4px 0 10px">
-    <p class="f-mono" style="color:var(--paper-soft);font-size:12px;margin:0 0 10px">colocação ao longo dos jogos encerrados na temporada</p>
+  return `<div style="padding:16px 18px 18px;background:rgba(0,0,0,0.15);border-radius:10px;margin:4px 0 10px">
+    <p class="f-mono" style="color:var(--paper-soft);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px;text-align:center">Ranking por jogo</p>
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
-      <line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H - PAD}" stroke="rgba(251,248,239,0.25)" />
-      <line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="rgba(251,248,239,0.25)" />
+      <line x1="${PAD_L}" y1="${PAD_TOP}" x2="${PAD_L}" y2="${H - PAD_BOTTOM}" stroke="rgba(251,248,239,0.2)" />
+      <line x1="${PAD_L}" y1="${H - PAD_BOTTOM}" x2="${W - PAD_R}" y2="${H - PAD_BOTTOM}" stroke="rgba(251,248,239,0.2)" />
       ${yLabels}${xLabels}
-      <path d="${path}" fill="none" stroke="#FFB100" stroke-width="3.5" />
+      <path d="${path}" fill="none" stroke="#8FD6AE" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
       ${circles}
     </svg>
-    <p class="f-mono" style="color:var(--white);font-size:14px;font-weight:600;margin-top:14px">${resumo}</p>
-    <p class="f-mono" style="color:var(--paper-soft);font-size:11px;margin-top:2px;opacity:.8">eixo X: nº de jogos já encerrados na temporada · eixo Y: colocação no grupo (1º no topo)</p>
+    <div style="display:flex;justify-content:center;gap:22px;margin-top:8px">
+      <span class="f-mono" style="font-size:12px;color:#8FD6AE">● Início: ${pontos[0].y}º</span>
+      <span class="f-mono" style="font-size:12px;color:#FFB100">● Atual: ${pontos[ultimo].y}º</span>
+    </div>
   </div>`;
 }
 
