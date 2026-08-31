@@ -595,35 +595,52 @@ function montarGraficoInline(historico, slug) {
   }
 
   const maxRank = Math.max(...pontos.map((p) => p.y), 1);
-  const W = 720, H = 400, PAD_L = 44, PAD_R = 26, PAD_TOP = 30, PAD_BOTTOM = 60;
+  const W = 720, H = 400, PAD_L = 44, PAD_R = 26, PAD_TOP = 24, PAD_BOTTOM = 46;
   const minX = Math.min(...pontos.map((p) => p.x));
   const maxX = Math.max(...pontos.map((p) => p.x));
   const sx = (x) => (maxX === minX ? (PAD_L + (W - PAD_R)) / 2 : PAD_L + ((x - minX) / (maxX - minX)) * (W - PAD_L - PAD_R));
   const sy = (y) => PAD_TOP + ((y - 1) / Math.max(maxRank - 1, 1)) * (H - PAD_TOP - PAD_BOTTOM);
 
   const ultimo = pontos.length - 1;
-  const path = pontos.map((p, i) => `${i === 0 ? "M" : "L"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
-  const circles = pontos.map((p, i) =>
-    i === ultimo
-      ? `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="11" fill="rgba(255,177,0,0.28)" /><circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="6.5" fill="#FFB100" stroke="#FBF8EF" stroke-width="1.5" />`
-      : `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="4" fill="#8FD6AE" />`
-  ).join("");
-  // mostra no máximo ~7 rótulos no eixo X (todos os confrontos poluiria demais em rodadas longas)
-  const passo = Math.max(1, Math.ceil(pontos.length / 7));
+  const pts = pontos.map((p) => [sx(p.x), sy(p.y)]);
+
+  // curva suave (Catmull-Rom convertida em Bézier) em vez de linha reta com pontinhos
+  function caminhoSuave(p) {
+    if (p.length < 3) return `M${p[0][0].toFixed(1)},${p[0][1].toFixed(1)} L${p[p.length - 1][0].toFixed(1)},${p[p.length - 1][1].toFixed(1)}`;
+    let d = `M${p[0][0].toFixed(1)},${p[0][1].toFixed(1)}`;
+    for (let i = 0; i < p.length - 1; i++) {
+      const p0 = p[i === 0 ? 0 : i - 1];
+      const p1 = p[i];
+      const p2 = p[i + 1];
+      const p3 = p[i + 2 < p.length ? i + 2 : i + 1];
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+      const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+      const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+    }
+    return d;
+  }
+  const path = caminhoSuave(pts);
+
+  // mostra no máximo ~6 rótulos no eixo X (todos os confrontos poluiria demais em temporadas longas) — no começo, com poucos jogos, mostra todos
+  const passo = Math.max(1, Math.ceil(pontos.length / 6));
   const xLabels = pontos.map((p, i) => (i % passo === 0 || i === ultimo)
     ? `<text x="${sx(p.x).toFixed(1)}" y="${H - PAD_BOTTOM + 22}" font-size="11" text-anchor="middle" fill="#EFE7D0">${p.rotulo}</text>`
     : "").join("");
   let yLabels = "";
-  for (let r = 1; r <= maxRank; r++) yLabels += `<text x="8" y="${(sy(r) + 4).toFixed(1)}" font-size="12" fill="#EFE7D0">${r}º</text>`;
+  for (let r = 1; r <= maxRank; r++) yLabels += `<text x="8" y="${(sy(r) + 4).toFixed(1)}" font-size="11" fill="#EFE7D0">${r}º</text>`;
+  let yGrades = "";
+  for (let r = 1; r <= maxRank; r++) yGrades += `<line x1="${PAD_L}" y1="${sy(r).toFixed(1)}" x2="${W - PAD_R}" y2="${sy(r).toFixed(1)}" stroke="rgba(251,248,239,0.08)" />`;
 
   return `<div style="padding:16px 18px 18px;background:rgba(0,0,0,0.15);border-radius:10px;margin:4px 0 10px">
     <p class="f-mono" style="color:var(--paper-soft);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px;text-align:center">Ranking por jogo</p>
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+      ${yGrades}
       <line x1="${PAD_L}" y1="${PAD_TOP}" x2="${PAD_L}" y2="${H - PAD_BOTTOM}" stroke="rgba(251,248,239,0.2)" />
       <line x1="${PAD_L}" y1="${H - PAD_BOTTOM}" x2="${W - PAD_R}" y2="${H - PAD_BOTTOM}" stroke="rgba(251,248,239,0.2)" />
       ${yLabels}${xLabels}
       <path d="${path}" fill="none" stroke="#8FD6AE" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
-      ${circles}
     </svg>
     <div style="display:flex;justify-content:center;gap:22px;margin-top:8px">
       <span class="f-mono" style="font-size:12px;color:#8FD6AE">● Início: ${pontos[0].y}º</span>
