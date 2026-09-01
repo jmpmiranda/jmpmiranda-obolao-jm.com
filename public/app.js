@@ -587,11 +587,19 @@ function montarGraficoInline(historico, slug) {
     })
     .filter(Boolean);
 
-  if (pontos.length < 2) {
+  if (pontos.length === 0) {
     return `<div style="padding:22px 18px;text-align:center">
       <p class="f-mono" style="color:var(--paper-soft);font-size:13px;margin:0">
         Ainda não há histórico suficiente pra desenhar o gráfico — ele vai se formando conforme os jogos da temporada vão terminando.
       </p></div>`;
+  }
+
+  if (pontos.length === 1) {
+    return `<div style="padding:20px 18px;text-align:center">
+      <p class="f-mono" style="color:var(--paper-soft);font-size:11px;margin:0 0 6px;text-transform:uppercase;letter-spacing:.05em">posição atual</p>
+      <p class="f-score" style="color:#FFB100;font-size:44px;margin:0">${pontos[0].y}º</p>
+      <p class="f-mono" style="color:var(--paper-soft);font-size:11px;margin:8px 0 0;opacity:.8">o gráfico de evolução aparece assim que mais um jogo terminar</p>
+    </div>`;
   }
 
   const maxRank = Math.max(...pontos.map((p) => p.y), 1);
