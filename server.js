@@ -141,7 +141,7 @@ async function buscarLiga(ligaId) {
   const meta = LEAGUE_META[ligaId];
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const hoje = new Date();
-  const de = new Date(hoje); de.setDate(de.getDate() - 30); // aumento moderado (era 3) pra Finalizados mostrar mais jogos, sem repetir o erro dos 200 dias
+  const de = new Date(hoje); de.setDate(de.getDate() - 3); // valor seguro e confirmado — 30 e 200 dias já quebraram a busca duas vezes
   const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
   const fmt = (d) => d.toISOString().slice(0, 10);
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
@@ -380,10 +380,23 @@ app.post("/api/grupos", autenticar, async (req, res) => {
   const db = req.db;
   let code;
   do { code = gerarCodigo(); } while (db.groups[code]);
+
+  // já nasce com um ponto de partida no histórico, em vez de esperar o segundo jogo
+  // terminar pra desenhar a primeira linha do gráfico
+  const jogosAgora = (scoresCache[liga] && scoresCache[liga].jogos) || [];
+  const jogosEncerradosAgora = jogosAgora.filter((j) => j.status === "final").length;
+
   db.groups[code] = {
     nome, senhaHash: hash(senha), liga, criadoPorEmail: req.userEmail, criadoEm: Date.now(),
     membros: { [req.userEmail]: { entrouEm: Date.now() } },
-    palpites: {}, historico: [], ultimoJogosEncerrados: -1,
+    palpites: {},
+    historico: [{
+      jogosEncerrados: jogosEncerradosAgora,
+      quando: Date.now(),
+      ultimoJogo: null,
+      linhas: [{ slug: idAnonimo(req.userEmail), jogador: db.users[req.userEmail].nome, total: 0, colocacao: 1 }],
+    }],
+    ultimoJogosEncerrados: jogosEncerradosAgora,
   };
   await saveDb(db);
   res.json({ code, nome, liga, souCriador: true });
