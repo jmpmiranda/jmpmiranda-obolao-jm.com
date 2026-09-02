@@ -139,7 +139,7 @@ function pararPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer =
 async function entrarNoBolao() {
   pararPolling();
   await atualizarDadosBolao();
-  pollTimer = setInterval(atualizarDadosBolao, 15000);
+  pollTimer = setInterval(atualizarDadosBolao, 10000);
 }
 
 async function atualizarDadosBolao() {
