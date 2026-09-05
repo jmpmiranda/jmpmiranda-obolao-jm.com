@@ -129,6 +129,9 @@ function autenticar(req, res, next) {
 /* ---------------- cache de placares (atualizado sozinho) ---------------- */
 
 const scoresCache = Object.fromEntries(LEAGUE_IDS.map((id) => [id, { atualizadoEm: null, jogos: [] }]));
+// guarda pra sempre (em memória) todo jogo que já vimos terminar, pra aba Finalizados
+// ir crescendo com o tempo sem precisar pedir uma janela de datas gigante pra API de uma vez
+const arquivoFinalizados = Object.fromEntries(LEAGUE_IDS.map((id) => [id, {}])); // ligaId -> { [jogoId]: jogo }
 
 function mapStatus(s) {
   if (s === "IN_PLAY" || s === "PAUSED") return "live";
@@ -141,7 +144,7 @@ async function buscarLiga(ligaId) {
   const meta = LEAGUE_META[ligaId];
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const hoje = new Date();
-  const de = new Date(hoje); de.setDate(de.getDate() - 3); // valor seguro e confirmado — 30 e 200 dias já quebraram a busca duas vezes
+  const de = new Date(hoje); de.setDate(de.getDate() - 200); // tentando de novo com mais cuidado — as quebras anteriores podem ter sido falha de build/upload, não da API
   const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
   const fmt = (d) => d.toISOString().slice(0, 10);
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
@@ -177,6 +180,9 @@ async function pollAll() {
     try {
       const jogos = await buscarLiga(ligaId);
       scoresCache[ligaId] = { atualizadoEm: Date.now(), jogos };
+      for (const j of jogos) {
+        if (j.status === "final") arquivoFinalizados[ligaId][j.id] = j;
+      }
       await atualizarHistoricoDosGrupos(ligaId, jogos);
     } catch (e) {
       console.error(`erro ao buscar ${ligaId}:`, e.message);
@@ -363,10 +369,17 @@ app.get("/api/scores/:liga", (req, res) => {
   if (!LEAGUE_META[liga]) return res.status(400).json({ erro: "liga inválida" });
   const c = scoresCache[liga];
   const tabela = standingsCache[liga] || {};
-  const jogos = c.jogos.map((j) => ({
+  const jogosJanela = c.jogos.map((j) => ({
     ...j,
     probabilidade: estimarProbabilidades(tabela[j.haId], tabela[j.aaId]),
   }));
+  // soma os jogos da janela atual (com placar/status fresquinhos) com tudo que já
+  // vimos terminar antes e não está mais nessa janela, pra Finalizados não perder nada
+  const idsNaJanela = new Set(jogosJanela.map((j) => j.id));
+  const antigos = Object.values(arquivoFinalizados[liga] || {})
+    .filter((j) => !idsNaJanela.has(j.id))
+    .map((j) => ({ ...j, probabilidade: null }));
+  const jogos = [...jogosJanela, ...antigos].sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
   res.json({ liga, meta: LEAGUE_META[liga], atualizadoEm: c.atualizadoEm, jogos, apiConfigurada: !!API_KEY });
 });
 
@@ -546,6 +559,43 @@ app.get("/api/grupos/:code/jogo/:jogoId/palpites", autenticar, (req, res) => {
   });
   linhas.sort((a, b) => (b.pontos ?? -1) - (a.pontos ?? -1));
   res.json({ jogo: { home: jogo.home, away: jogo.away, hs: jogo.hs, as: jogo.as, status: jogo.status }, linhas });
+});
+
+/* últimos 5 jogos de um time (forma recente) — guarda em cache por 20 min pra não gastar
+   muitas chamadas da API só porque várias pessoas abriram o mesmo jogo pra ver */
+const formaCache = {}; // teamId -> { atualizadoEm, jogos }
+const FORMA_CACHE_MS = 20 * 60 * 1000;
+
+async function buscarUltimosJogosTime(teamId) {
+  const cache = formaCache[teamId];
+  if (cache && Date.now() - cache.atualizadoEm < FORMA_CACHE_MS) return cache.jogos;
+  if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
+  const url = `https://api.football-data.org/v4/teams/${teamId}/matches?status=FINISHED&limit=5`;
+  const resp = await fetch(url, { headers: { "X-Auth-Token": API_KEY } });
+  if (!resp.ok) throw new Error(`times respondeu ${resp.status}`);
+  const data = await resp.json();
+  const jogos = (data.matches || []).slice(-5).reverse().map((m) => {
+    const casaId = m.homeTeam?.id;
+    const mandante = casaId === teamId;
+    const golsTime = mandante ? m.score?.fullTime?.home : m.score?.fullTime?.away;
+    const golsAdversario = mandante ? m.score?.fullTime?.away : m.score?.fullTime?.home;
+    let resultado = "E";
+    if (golsTime > golsAdversario) resultado = "V";
+    else if (golsTime < golsAdversario) resultado = "D";
+    const adversario = mandante ? (m.awayTeam?.shortName || m.awayTeam?.name) : (m.homeTeam?.shortName || m.homeTeam?.name);
+    return { data: m.utcDate, adversario, mandante, golsTime, golsAdversario, resultado };
+  });
+  formaCache[teamId] = { atualizadoEm: Date.now(), jogos };
+  return jogos;
+}
+
+app.get("/api/times/:id/ultimos", autenticar, async (req, res) => {
+  try {
+    const jogos = await buscarUltimosJogosTime(Number(req.params.id));
+    res.json({ jogos });
+  } catch (e) {
+    res.status(502).json({ erro: "não consegui buscar o histórico desse time agora" });
+  }
 });
 
 app.get("*", (req, res) => {
