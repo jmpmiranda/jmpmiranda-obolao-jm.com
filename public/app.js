@@ -29,6 +29,8 @@ const state = {
   editandoDesde: {},
   palpitesConfirmados: new Set(),
   detalhesJogoAberto: null,
+  jogoAberto: null,
+  formaCache: {},
   detalhesJogoCache: {},
   melhorRodada: null,
   modoEscuro: localStorage.getItem("bolao_modo_escuro") === "1",
@@ -314,7 +316,7 @@ window.criarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {}; state.jogoAberto = null;
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -338,7 +340,7 @@ window.entrarGrupo = async function () {
     state.meusGrupos = [...state.meusGrupos.filter((g) => g.code !== r.code), { code: r.code, nome: r.nome, liga: r.liga }];
     localStorage.setItem("bolao_ultimo_grupo", r.code);
     state.grupo = { code: r.code, nome: r.nome, liga: r.liga, souCriador: !!r.souCriador };
-    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+    state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {}; state.jogoAberto = null;
     state.erro = "";
     state.view = "bolao";
     state.abaBolao = "jogos";
@@ -357,7 +359,7 @@ window.abrirGrupoLocal = async function (code) {
   if (!entry) return;
   localStorage.setItem("bolao_ultimo_grupo", code);
   state.grupo = { code: entry.code, nome: entry.nome, liga: entry.liga, souCriador: false };
-  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {}; state.jogoAberto = null;
   state.view = "bolao";
   state.abaBolao = "jogos";
   render();
@@ -376,7 +378,7 @@ window.trocarDeGrupo = function () {
   state.grupo = null;
   state.classificacao = [];
   state.scores = { jogos: [], atualizadoEm: null };
-  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {};
+  state.statusPorJogo = {}; state.editandoJogo = new Set(); state.editandoDesde = {}; state.palpitesConfirmados = new Set(); state.detalhesJogoAberto = null; state.detalhesJogoCache = {}; state.jogoAberto = null;
   state.view = "home";
   render();
 };
@@ -877,12 +879,43 @@ function statusJogoHtml(jogoId) {
   return "";
 }
 
+window.toggleJogoAberto = function (jogoId, haId, aaId) {
+  if (state.jogoAberto === jogoId) { state.jogoAberto = null; render(); return; }
+  state.jogoAberto = jogoId;
+  render();
+  [haId, aaId].forEach((teamId) => {
+    if (!teamId || state.formaCache[teamId]) return;
+    api(`/api/times/${teamId}/ultimos`)
+      .then((r) => { state.formaCache[teamId] = r.jogos || []; render(); })
+      .catch(() => { state.formaCache[teamId] = []; render(); });
+  });
+};
+
+function formaTimeHtml(nome, teamId) {
+  const jogos = state.formaCache[teamId];
+  const bolinhas = !jogos
+    ? `<span class="f-mono" style="font-size:11px;color:var(--ink-soft)">carregando…</span>`
+    : jogos.length === 0
+    ? `<span class="f-mono" style="font-size:11px;color:var(--ink-soft)">sem histórico recente</span>`
+    : jogos.map((j) => {
+        const cor = j.resultado === "V" ? "#1FAA59" : j.resultado === "D" ? "var(--live)" : "var(--gold)";
+        const titulo = `${j.mandante ? "vs" : "@"} ${j.adversario}: ${j.golsTime}-${j.golsAdversario}`;
+        return `<span title="${titulo}" style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:${cor};color:#fff;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;margin-right:4px">${j.resultado}</span>`;
+      }).join("");
+  return `
+    <div style="margin-bottom:8px">
+      <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 4px">${nome} — últimos 5</p>
+      <div>${bolinhas}</div>
+    </div>`;
+}
+
 function cartaoJogo(g) {
   const bloqueado = g.status !== "scheduled";
   const pick = state.meusPalpites[g.id] || { h: 0, a: 0 };
   const pts = window.Pontuacao.pointsFor(state.meusPalpites[g.id], g);
   const temPalpiteSalvo = state.palpitesConfirmados.has(g.id);
   const editando = !bloqueado && (state.editandoJogo.has(g.id) || !temPalpiteSalvo);
+  const aberto = state.jogoAberto === g.id;
   let statusHtml;
   if (g.status === "live") {
     const tempo = g.minuto != null ? `${g.minuto}${g.acrescimo ? "+" + g.acrescimo : ""}'` : null;
@@ -892,8 +925,40 @@ function cartaoJogo(g) {
   else if (g.status === "adiado") statusHtml = `<span class="f-mono" style="color:var(--live);font-size:12px">adiado</span>`;
   else statusHtml = `<span class="f-mono" style="color:var(--gold);font-size:12px">a começar</span>`;
 
+  // aba de jogos que ainda não começaram: o card fica fechado (só info),
+  // toca pra abrir e só aí aparecem os botões de +/− e a forma dos times
+  const resumoPalpite = temPalpiteSalvo && state.meusPalpites[g.id]
+    ? `seu palpite: <b style="color:var(--ink)">${state.meusPalpites[g.id].h} – ${state.meusPalpites[g.id].a}</b>`
+    : "você ainda não palpitou";
+
+  const painelAberto = !bloqueado ? `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18)" onclick="event.stopPropagation()">
+        ${editando
+          ? `<div class="stepper" style="margin-top:2px">
+              <button onclick="ajustarPalpite('${g.id}','h',-1)">−</button><span>${pick.h}</span><button onclick="ajustarPalpite('${g.id}','h',1)">+</button>
+              <span class="f-score" style="font-size:20px;color:var(--ink-soft)">×</span>
+              <button onclick="ajustarPalpite('${g.id}','a',-1)">−</button><span>${pick.a}</span><button onclick="ajustarPalpite('${g.id}','a',1)">+</button>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:8px">
+              <button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:12px;padding:7px 18px" onclick="salvarUmJogo('${g.id}')">Salvar</button>
+              ${statusJogoHtml(g.id)}
+            </div>`
+          : `<div style="border:2px solid #1FAA59;background:rgba(31,170,89,0.10);border-radius:9px;padding:9px;text-align:center">
+              <div class="f-mono" style="font-size:10px;color:#1FAA59;font-weight:700;letter-spacing:.05em">✓ SALVO</div>
+              <div class="f-score" style="font-size:26px;color:var(--ink);margin-top:1px">${pick.h} – ${pick.a}</div>
+              <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;margin-top:6px;background:var(--pitch)" onclick="alterarJogo('${g.id}')">Alterar</button>
+            </div>`}
+        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed rgba(28,27,20,0.18)">
+          ${probabilidadeHtml(g.probabilidade, g.ha, g.aa)}
+          <div style="margin-top:10px">
+            ${formaTimeHtml(g.home, g.haId)}
+            ${formaTimeHtml(g.away, g.aaId)}
+          </div>
+        </div>
+      </div>` : "";
+
   return `
-    <div class="ticket">
+    <div class="ticket" ${!bloqueado ? `onclick="toggleJogoAberto('${g.id}',${g.haId || "null"},${g.aaId || "null"})" style="cursor:pointer"` : ""}>
       <div style="display:flex;justify-content:space-between;margin-bottom:10px">
         <span class="f-mono" style="color:var(--ink-soft);font-size:11px">${fmtKickoff(g.kickoff)}</span>
         ${statusHtml}
@@ -911,35 +976,27 @@ function cartaoJogo(g) {
           <div class="f-mono" style="font-size:11px;color:var(--ink-soft)">${g.aa}</div>
         </div>
       </div>
-      ${!bloqueado ? probabilidadeHtml(g.probabilidade, g.ha, g.aa) : ""}
-      <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18)">
-        <div style="display:flex;justify-content:space-between;margin-bottom:2px">
-          <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">seu palpite</span>
-          ${bloqueado && pts ? `<span class="badge" style="background:${pts.total > 0 ? "var(--amber)" : "transparent"};color:var(--ink)">${pts.total > 0 ? `+${pts.total} pts` : "sem pontos"}</span>` : ""}
+
+      ${!bloqueado ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18);display:flex;justify-content:space-between;align-items:center">
+          <span class="f-mono" style="font-size:12px;color:var(--ink-soft)">${resumoPalpite}</span>
+          <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">${aberto ? "▾ fechar" : "▸ apostar"}</span>
         </div>
-        ${bloqueado && pts && pts.tags.length ? `<div class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">${pts.tags.join(" · ")}</div>` : ""}
-        ${bloqueado
-          ? `<div onclick="toggleDetalhesJogo('${g.id}')" style="cursor:pointer;text-align:center;font-size:22px;color:var(--ink-soft);margin-top:4px">
-              <div class="f-score" style="font-size:22px">🔒 ${state.meusPalpites[g.id]?.h ?? "–"} – ${state.meusPalpites[g.id]?.a ?? "–"}</div>
-              <div class="f-mono" style="font-size:10px;color:var(--ink-soft);margin-top:2px">${state.detalhesJogoAberto === g.id ? "▾" : "▸"} ver palpite de todo mundo</div>
-            </div>
-            ${state.detalhesJogoAberto === g.id ? montarDetalhesJogoHtml(state.detalhesJogoCache[g.id]) : ""}`
-          : editando
-          ? `<div class="stepper" style="margin-top:4px">
-              <button onclick="ajustarPalpite('${g.id}','h',-1)">−</button><span>${pick.h}</span><button onclick="ajustarPalpite('${g.id}','h',1)">+</button>
-              <span class="f-score" style="font-size:20px;color:var(--ink-soft)">×</span>
-              <button onclick="ajustarPalpite('${g.id}','a',-1)">−</button><span>${pick.a}</span><button onclick="ajustarPalpite('${g.id}','a',1)">+</button>
-            </div>
-            <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:8px">
-              <button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:12px;padding:7px 18px" onclick="salvarUmJogo('${g.id}')">Salvar</button>
-              ${statusJogoHtml(g.id)}
-            </div>`
-          : `<div style="border:2px solid #1FAA59;background:rgba(31,170,89,0.10);border-radius:9px;padding:9px;margin-top:4px;text-align:center">
-              <div class="f-mono" style="font-size:10px;color:#1FAA59;font-weight:700;letter-spacing:.05em">✓ SALVO</div>
-              <div class="f-score" style="font-size:26px;color:var(--ink);margin-top:1px">${pick.h} – ${pick.a}</div>
-              <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;margin-top:6px;background:var(--pitch)" onclick="alterarJogo('${g.id}')">Alterar</button>
-            </div>`}
-      </div>
+        ${aberto ? painelAberto : ""}
+      ` : `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18)">
+          <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+            <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">seu palpite</span>
+            ${pts ? `<span class="badge" style="background:${pts.total > 0 ? "var(--amber)" : "transparent"};color:var(--ink)">${pts.total > 0 ? `+${pts.total} pts` : "sem pontos"}</span>` : ""}
+          </div>
+          ${pts && pts.tags.length ? `<div class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">${pts.tags.join(" · ")}</div>` : ""}
+          <div onclick="toggleDetalhesJogo('${g.id}')" style="cursor:pointer;text-align:center;font-size:22px;color:var(--ink-soft);margin-top:4px">
+            <div class="f-score" style="font-size:22px">🔒 ${state.meusPalpites[g.id]?.h ?? "–"} – ${state.meusPalpites[g.id]?.a ?? "–"}</div>
+            <div class="f-mono" style="font-size:10px;color:var(--ink-soft);margin-top:2px">${state.detalhesJogoAberto === g.id ? "▾" : "▸"} ver palpite de todo mundo</div>
+          </div>
+          ${state.detalhesJogoAberto === g.id ? montarDetalhesJogoHtml(state.detalhesJogoCache[g.id]) : ""}
+        </div>
+      `}
     </div>`;
 }
 
