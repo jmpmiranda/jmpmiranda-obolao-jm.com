@@ -148,7 +148,7 @@ async function buscarLiga(ligaId) {
   const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
   const fmt = (d) => d.toISOString().slice(0, 10);
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
-  const resp = await fetch(url, { headers: { "X-Auth-Token": API_KEY } });
+  const resp = await fetchFootballData(url);
   if (!resp.ok) throw new Error(`football-data respondeu ${resp.status}`);
   const data = await resp.json();
   const jogos = (data.matches || []).map((m) => ({
@@ -175,6 +175,30 @@ async function buscarLiga(ligaId) {
 
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+/* controle ÚNICO e global de chamadas pra API externa — antes, cada função (jogos,
+   tabela, últimos jogos de um time) só se preocupava com o próprio ritmo, então
+   quando duas rodavam ao mesmo tempo (ex: alguém abrindo a folha de apostar bem na
+   hora do poll automático) o total podia passar de 10/min e a API começava a
+   recusar pedidos — fazendo os jogos "sumirem" até a próxima tentativa dar certo.
+   Agora TODA chamada, de qualquer lugar do código, passa por aqui primeiro. */
+const chamadasRecentes = [];
+const LIMITE_CHAMADAS_POR_MINUTO = 9; // deixa 1 de margem do limite real (10) da API
+async function respeitarLimiteApi() {
+  const agora = Date.now();
+  while (chamadasRecentes.length && agora - chamadasRecentes[0] > 60000) chamadasRecentes.shift();
+  if (chamadasRecentes.length >= LIMITE_CHAMADAS_POR_MINUTO) {
+    const espera = 60000 - (Date.now() - chamadasRecentes[0]) + 250;
+    await delay(Math.max(espera, 250));
+    return respeitarLimiteApi();
+  }
+  chamadasRecentes.push(Date.now());
+}
+
+async function fetchFootballData(url) {
+  await respeitarLimiteApi();
+  return fetch(url, { headers: { "X-Auth-Token": API_KEY } });
+}
+
 async function pollAll() {
   for (const ligaId of LEAGUE_IDS) {
     try {
@@ -199,7 +223,7 @@ async function buscarTabela(ligaId) {
   const meta = LEAGUE_META[ligaId];
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const url = `https://api.football-data.org/v4/competitions/${meta.code}/standings`;
-  const resp = await fetch(url, { headers: { "X-Auth-Token": API_KEY } });
+  const resp = await fetchFootballData(url);
   if (!resp.ok) throw new Error(`standings respondeu ${resp.status}`);
   const data = await resp.json();
   const grupo = (data.standings || []).find((s) => s.type === "TOTAL") || (data.standings || [])[0];
@@ -571,7 +595,7 @@ async function buscarUltimosJogosTime(teamId) {
   if (cache && Date.now() - cache.atualizadoEm < FORMA_CACHE_MS) return cache.jogos;
   if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
   const url = `https://api.football-data.org/v4/teams/${teamId}/matches?status=FINISHED&limit=5`;
-  const resp = await fetch(url, { headers: { "X-Auth-Token": API_KEY } });
+  const resp = await fetchFootballData(url);
   if (!resp.ok) throw new Error(`times respondeu ${resp.status}`);
   const data = await resp.json();
   const jogos = (data.matches || []).slice(-5).reverse().map((m) => {
