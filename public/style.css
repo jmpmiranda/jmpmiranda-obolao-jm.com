@@ -70,3 +70,21 @@ button, input { font-family: 'Inter', sans-serif; border: none; }
 .badge { font-size: 11px; padding: 2px 7px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; }
 
 ::-webkit-scrollbar { height: 6px; width: 6px; }
+
+/* folha de apostar (bottom sheet) — sobe de baixo e cobre quase a tela toda */
+.sheet-backdrop {
+  position: fixed; inset: 0; background: rgba(10,20,15,0.6); z-index: 60;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.sheet-painel {
+  background: var(--paper); width: 100%; max-width: 640px;
+  height: 88vh; max-height: 88vh;
+  border-radius: 20px 20px 0 0;
+  display: flex; flex-direction: column;
+  padding-top: 10px;
+  transform: translateY(100%);
+  transition: transform .28s cubic-bezier(.32,.72,0,1);
+  box-shadow: 0 -8px 30px rgba(0,0,0,0.35);
+}
+.sheet-painel.aberta { transform: translateY(0); }
+.sheet-alca { width: 40px; height: 4px; border-radius: 2px; background: rgba(28,27,20,0.25); margin: 0 auto 10px; }

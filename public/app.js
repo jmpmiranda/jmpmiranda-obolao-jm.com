@@ -879,8 +879,7 @@ function statusJogoHtml(jogoId) {
   return "";
 }
 
-window.toggleJogoAberto = function (jogoId, haId, aaId) {
-  if (state.jogoAberto === jogoId) { state.jogoAberto = null; render(); return; }
+window.abrirFolhaAposta = function (jogoId, haId, aaId) {
   state.jogoAberto = jogoId;
   render();
   [haId, aaId].forEach((teamId) => {
@@ -891,31 +890,120 @@ window.toggleJogoAberto = function (jogoId, haId, aaId) {
   });
 };
 
+window.fecharFolhaAposta = function () {
+  const painel = document.getElementById("sheet-painel");
+  if (painel) {
+    painel.classList.remove("aberta");
+    setTimeout(() => { state.jogoAberto = null; render(); }, 200);
+  } else {
+    state.jogoAberto = null;
+    render();
+  }
+};
+
 function formaTimeHtml(nome, teamId) {
   const jogos = state.formaCache[teamId];
-  const bolinhas = !jogos
-    ? `<span class="f-mono" style="font-size:11px;color:var(--ink-soft)">carregando…</span>`
-    : jogos.length === 0
-    ? `<span class="f-mono" style="font-size:11px;color:var(--ink-soft)">sem histórico recente</span>`
-    : jogos.map((j) => {
-        const cor = j.resultado === "V" ? "#1FAA59" : j.resultado === "D" ? "var(--live)" : "var(--gold)";
-        const titulo = `${j.mandante ? "vs" : "@"} ${j.adversario}: ${j.golsTime}-${j.golsAdversario}`;
-        return `<span title="${titulo}" style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:${cor};color:#fff;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;margin-right:4px">${j.resultado}</span>`;
-      }).join("");
+  let conteudo;
+  if (!jogos) {
+    conteudo = `<span class="f-mono" style="font-size:12px;color:var(--ink-soft)">carregando…</span>`;
+  } else if (jogos.length === 0) {
+    conteudo = `<span class="f-mono" style="font-size:12px;color:var(--ink-soft)">sem histórico recente</span>`;
+  } else {
+    conteudo = jogos.map((j) => {
+      const cor = j.resultado === "V" ? "#1FAA59" : j.resultado === "D" ? "var(--live)" : "var(--gold)";
+      const dataFmt = (() => { try { return new Date(j.data).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }); } catch { return ""; } })();
+      return `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 2px;border-bottom:1px solid rgba(28,27,20,0.08)">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:${cor};color:#fff;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;flex-shrink:0">${j.resultado}</span>
+            <span class="f-mono" style="font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${j.mandante ? "vs" : "@"} ${j.adversario}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">${dataFmt}</span>
+            <span class="f-score" style="font-size:16px;color:var(--ink)">${j.golsTime}-${j.golsAdversario}</span>
+          </div>
+        </div>`;
+    }).join("");
+  }
   return `
-    <div style="margin-bottom:8px">
-      <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 4px">${nome} — últimos 5</p>
-      <div>${bolinhas}</div>
+    <div style="margin-bottom:14px">
+      <p class="f-display" style="font-size:13px;color:var(--ink);margin:0 0 4px;text-transform:uppercase">${nome} — últimos 5 jogos</p>
+      <div>${conteudo}</div>
     </div>`;
+}
+
+function montarFolhaAposta(g) {
+  const bloqueado = g.status !== "scheduled";
+  const pick = state.meusPalpites[g.id] || { h: 0, a: 0 };
+  const temPalpiteSalvo = state.palpitesConfirmados.has(g.id);
+  const editando = !bloqueado ? (state.editandoJogo.has(g.id) || !temPalpiteSalvo) : false;
+
+  return `
+    <div class="sheet-backdrop" onclick="fecharFolhaAposta()">
+      <div class="sheet-painel" id="sheet-painel" onclick="event.stopPropagation()">
+        <div class="sheet-alca"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:0 18px 10px">
+          <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">${fmtKickoff(g.kickoff)}</span>
+          <button class="icon-btn" style="background:var(--paper-soft);color:var(--ink)" onclick="fecharFolhaAposta()">✕</button>
+        </div>
+        <div style="padding:0 18px 24px;overflow-y:auto;flex:1">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:16px">
+            <div style="flex:1;min-width:0;text-align:center">
+              ${escudoHtml(g.haEscudo, g.ha, 44)}
+              <div class="f-display" style="font-size:14px;color:var(--ink)">${g.home}</div>
+            </div>
+            <div class="f-score" style="font-size:28px;color:var(--ink-soft);padding:0 8px">${bloqueado ? `${g.hs} – ${g.as}` : "vs"}</div>
+            <div style="flex:1;min-width:0;text-align:center">
+              ${escudoHtml(g.aaEscudo, g.aa, 44)}
+              <div class="f-display" style="font-size:14px;color:var(--ink)">${g.away}</div>
+            </div>
+          </div>
+
+          ${!bloqueado ? `
+          <div style="margin-bottom:16px">
+            ${editando
+              ? `<div class="stepper" style="margin-top:2px">
+                  <button onclick="ajustarPalpite('${g.id}','h',-1)">−</button><span>${pick.h}</span><button onclick="ajustarPalpite('${g.id}','h',1)">+</button>
+                  <span class="f-score" style="font-size:20px;color:var(--ink-soft)">×</span>
+                  <button onclick="ajustarPalpite('${g.id}','a',-1)">−</button><span>${pick.a}</span><button onclick="ajustarPalpite('${g.id}','a',1)">+</button>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px">
+                  <button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:13px;padding:9px 22px" onclick="salvarUmJogo('${g.id}')">Salvar</button>
+                  ${statusJogoHtml(g.id)}
+                </div>`
+              : `<div style="border:2px solid #1FAA59;background:rgba(31,170,89,0.10);border-radius:9px;padding:12px;text-align:center">
+                  <div class="f-mono" style="font-size:11px;color:#1FAA59;font-weight:700;letter-spacing:.05em">✓ SALVO</div>
+                  <div class="f-score" style="font-size:30px;color:var(--ink);margin-top:1px">${pick.h} – ${pick.a}</div>
+                  <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;margin-top:8px;background:var(--pitch)" onclick="alterarJogo('${g.id}')">Alterar</button>
+                </div>`}
+          </div>
+          <div style="padding-top:14px;border-top:1px dashed rgba(28,27,20,0.18);margin-bottom:14px">
+            ${probabilidadeHtml(g.probabilidade, g.ha, g.aa)}
+          </div>` : `
+          <div style="text-align:center;margin-bottom:16px">
+            <span class="f-mono" style="font-size:12px;color:var(--ink-soft)">seu palpite foi ${state.meusPalpites[g.id] ? `${state.meusPalpites[g.id].h} – ${state.meusPalpites[g.id].a}` : "não registrado"}</span>
+          </div>`}
+
+          <div style="padding-top:4px">
+            ${formaTimeHtml(g.home, g.haId)}
+            ${formaTimeHtml(g.away, g.aaId)}
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function statusJogoHtml(jogoId) {
+  const s = state.statusPorJogo[jogoId];
+  if (s === "salvando") return `<span class="f-mono" style="font-size:10px;color:var(--ink-soft)">💾 salvando…</span>`;
+  if (s === "erro") return `<span class="f-mono" style="font-size:10px;color:var(--live)">não salvou — tenta de novo</span>`;
+  return "";
 }
 
 function cartaoJogo(g) {
   const bloqueado = g.status !== "scheduled";
-  const pick = state.meusPalpites[g.id] || { h: 0, a: 0 };
   const pts = window.Pontuacao.pointsFor(state.meusPalpites[g.id], g);
   const temPalpiteSalvo = state.palpitesConfirmados.has(g.id);
-  const editando = !bloqueado && (state.editandoJogo.has(g.id) || !temPalpiteSalvo);
-  const aberto = state.jogoAberto === g.id;
   let statusHtml;
   if (g.status === "live") {
     const tempo = g.minuto != null ? `${g.minuto}${g.acrescimo ? "+" + g.acrescimo : ""}'` : null;
@@ -926,39 +1014,13 @@ function cartaoJogo(g) {
   else statusHtml = `<span class="f-mono" style="color:var(--gold);font-size:12px">a começar</span>`;
 
   // aba de jogos que ainda não começaram: o card fica fechado (só info),
-  // toca pra abrir e só aí aparecem os botões de +/− e a forma dos times
+  // toca pra abrir a folha de apostar (steppers, forma dos times etc)
   const resumoPalpite = temPalpiteSalvo && state.meusPalpites[g.id]
     ? `seu palpite: <b style="color:var(--ink)">${state.meusPalpites[g.id].h} – ${state.meusPalpites[g.id].a}</b>`
     : "você ainda não palpitou";
 
-  const painelAberto = !bloqueado ? `
-      <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18)" onclick="event.stopPropagation()">
-        ${editando
-          ? `<div class="stepper" style="margin-top:2px">
-              <button onclick="ajustarPalpite('${g.id}','h',-1)">−</button><span>${pick.h}</span><button onclick="ajustarPalpite('${g.id}','h',1)">+</button>
-              <span class="f-score" style="font-size:20px;color:var(--ink-soft)">×</span>
-              <button onclick="ajustarPalpite('${g.id}','a',-1)">−</button><span>${pick.a}</span><button onclick="ajustarPalpite('${g.id}','a',1)">+</button>
-            </div>
-            <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:8px">
-              <button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:12px;padding:7px 18px" onclick="salvarUmJogo('${g.id}')">Salvar</button>
-              ${statusJogoHtml(g.id)}
-            </div>`
-          : `<div style="border:2px solid #1FAA59;background:rgba(31,170,89,0.10);border-radius:9px;padding:9px;text-align:center">
-              <div class="f-mono" style="font-size:10px;color:#1FAA59;font-weight:700;letter-spacing:.05em">✓ SALVO</div>
-              <div class="f-score" style="font-size:26px;color:var(--ink);margin-top:1px">${pick.h} – ${pick.a}</div>
-              <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;margin-top:6px;background:var(--pitch)" onclick="alterarJogo('${g.id}')">Alterar</button>
-            </div>`}
-        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed rgba(28,27,20,0.18)">
-          ${probabilidadeHtml(g.probabilidade, g.ha, g.aa)}
-          <div style="margin-top:10px">
-            ${formaTimeHtml(g.home, g.haId)}
-            ${formaTimeHtml(g.away, g.aaId)}
-          </div>
-        </div>
-      </div>` : "";
-
   return `
-    <div class="ticket" ${!bloqueado ? `onclick="toggleJogoAberto('${g.id}',${g.haId || "null"},${g.aaId || "null"})" style="cursor:pointer"` : ""}>
+    <div class="ticket" ${!bloqueado ? `onclick="abrirFolhaAposta('${g.id}',${g.haId || "null"},${g.aaId || "null"})" style="cursor:pointer"` : ""}>
       <div style="display:flex;justify-content:space-between;margin-bottom:10px">
         <span class="f-mono" style="color:var(--ink-soft);font-size:11px">${fmtKickoff(g.kickoff)}</span>
         ${statusHtml}
@@ -980,9 +1042,8 @@ function cartaoJogo(g) {
       ${!bloqueado ? `
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18);display:flex;justify-content:space-between;align-items:center">
           <span class="f-mono" style="font-size:12px;color:var(--ink-soft)">${resumoPalpite}</span>
-          <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">${aberto ? "▾ fechar" : "▸ apostar"}</span>
+          <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">▸ apostar</span>
         </div>
-        ${aberto ? painelAberto : ""}
       ` : `
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(28,27,20,0.18)">
           <div style="display:flex;justify-content:space-between;margin-bottom:2px">
@@ -1286,6 +1347,33 @@ function render() {
   else if (state.view === "codigo-recuperacao") el.innerHTML = telaCodigoRecuperacao();
   else if (state.view === "home") el.innerHTML = telaHome();
   else if (state.view === "bolao") el.innerHTML = telaBolao();
+  renderFolhaAposta();
+}
+
+function renderFolhaAposta() {
+  let overlay = document.getElementById("sheet-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "sheet-overlay";
+    document.body.appendChild(overlay);
+  }
+  if (!state.jogoAberto || !state.grupo) {
+    overlay.innerHTML = "";
+    return;
+  }
+  const g = (state.scores.jogos || []).find((j) => j.id === state.jogoAberto);
+  if (!g) { overlay.innerHTML = ""; return; }
+
+  const jaExistia = !!document.getElementById("sheet-painel");
+  overlay.innerHTML = montarFolhaAposta(g);
+  const painel = document.getElementById("sheet-painel");
+  if (painel) {
+    if (jaExistia) {
+      painel.classList.add("aberta");
+    } else {
+      requestAnimationFrame(() => requestAnimationFrame(() => painel.classList.add("aberta")));
+    }
+  }
 }
 
 iniciar();
