@@ -10,6 +10,10 @@ const path = require("path");
 const crypto = require("crypto");
 const Pontuacao = require("./public/scoring.js");
 
+// notificações no celular (Web Push). Se o pacote não estiver instalado o resto do app segue funcionando.
+let webpush = null;
+try { webpush = require("web-push"); } catch { console.warn("⚠️  pacote web-push não instalado — notificações desligadas. Rode npm install."); }
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -71,6 +75,9 @@ async function loadDb() {
   db.users = db.users || {};
   db.sessions = db.sessions || {};
   db.groups = db.groups || {};
+  db.pushSubs = db.pushSubs || {}; // email -> [{endpoint, keys}] (um por aparelho)
+  db.estadoJogos = db.estadoJogos || {}; // jogoId -> {s, h, a} (pra detectar gol/início/fim)
+  db.lembretesEnviados = db.lembretesEnviados || {}; // "email:jogoId" -> timestamp
   return db;
 }
 
@@ -207,7 +214,16 @@ async function pollAll() {
       for (const j of jogos) {
         if (j.status === "final") arquivoFinalizados[ligaId][j.id] = j;
       }
-      await atualizarHistoricoDosGrupos(ligaId, jogos);
+      const db = await loadDb();
+      let mudou = atualizarHistoricoDosGrupos(db, ligaId, jogos);
+      let envios = [];
+      try {
+        const r = prepararNotificacoes(db, ligaId, jogos);
+        if (r.mudou) mudou = true;
+        envios = r.envios;
+      } catch (e) { console.error("erro preparando notificações:", e.message); }
+      if (mudou) await saveDb(db); // salva ANTES de enviar os pushes (envio é lento e não deve segurar o db)
+      if (envios.length) await enviarPushes(envios);
     } catch (e) {
       console.error(`erro ao buscar ${ligaId}:`, e.message);
     }
@@ -264,11 +280,10 @@ function estimarProbabilidades(casa, fora) {
 
 /* registra, para cada grupo dessa liga, uma "foto" da classificação
    sempre que o número de jogos encerrados mudar — é isso que vira o gráfico */
-async function atualizarHistoricoDosGrupos(ligaId, jogos) {
+function atualizarHistoricoDosGrupos(db, ligaId, jogos) {
   const finalizados = jogos.filter((j) => j.status === "final").sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
   const jogosEncerrados = finalizados.length;
   const ultimoJogo = finalizados.length > 0 ? finalizados[finalizados.length - 1] : null;
-  const db = await loadDb();
   let mudou = false;
   for (const [code, g] of Object.entries(db.groups)) {
     if (g.liga !== ligaId) continue;
@@ -290,7 +305,177 @@ async function atualizarHistoricoDosGrupos(ligaId, jogos) {
     g.ultimoJogosEncerrados = jogosEncerrados;
     mudou = true;
   }
-  if (mudou) await saveDb(db);
+  return mudou;
+}
+
+/* ---------------- notificações no celular (Web Push) ----------------
+   O servidor (que fica ligado 24h) detecta início de jogo, gol e fim de jogo e manda
+   uma notificação pro celular de cada participante — não depende do app estar aberto.
+   Todas as notificações de um mesmo jogo usam a mesma "tag", então o celular troca a
+   anterior pela nova: na tela de bloqueio fica sempre UMA notificação por jogo com o
+   placar mais recente (é o mais perto de "placar ao vivo" que um app web consegue). */
+
+const VAPID_PATH = path.join(__dirname, "data", "vapid.json");
+const VAPID_KEY = "bolao_vapid"; // guardado À PARTE do db principal, pra nunca precisar regravar o db inteiro no boot
+let VAPID = null; // { pub, priv }
+
+async function iniciarPush() {
+  if (!webpush) return;
+  let pub = process.env.VAPID_PUBLIC_KEY || "";
+  let priv = process.env.VAPID_PRIVATE_KEY || "";
+  if (!pub || !priv) {
+    let chaves = null;
+    if (UPSTASH_URL && UPSTASH_TOKEN) {
+      try {
+        const data = await upstashCommand(["GET", VAPID_KEY]);
+        chaves = data.result ? JSON.parse(data.result) : null;
+        if (!chaves) {
+          chaves = webpush.generateVAPIDKeys();
+          await upstashCommand(["SET", VAPID_KEY, JSON.stringify(chaves)]);
+        }
+      } catch (e) {
+        console.error("push: não consegui ler/gravar as chaves no Upstash:", e.message);
+        return;
+      }
+    } else {
+      try { chaves = fs.existsSync(VAPID_PATH) ? JSON.parse(fs.readFileSync(VAPID_PATH, "utf8")) : null; } catch { chaves = null; }
+      if (!chaves) {
+        chaves = webpush.generateVAPIDKeys();
+        try {
+          fs.mkdirSync(path.dirname(VAPID_PATH), { recursive: true });
+          fs.writeFileSync(VAPID_PATH, JSON.stringify(chaves));
+        } catch (e) { console.error("push: falha ao gravar chaves:", e.message); }
+      }
+    }
+    pub = chaves.publicKey;
+    priv = chaves.privateKey;
+  }
+  const assunto = process.env.VAPID_SUBJECT || process.env.RENDER_EXTERNAL_URL || "mailto:bolao@localhost.dev";
+  webpush.setVapidDetails(assunto, pub, priv);
+  VAPID = { pub, priv };
+  console.log("🔔 notificações push ligadas");
+}
+
+const JANELA_ANTES_MS = 36 * 3600 * 1000; // só acompanha jogos de 12h atrás até 36h à frente
+const JANELA_DEPOIS_MS = 12 * 3600 * 1000;
+const IDADE_MAX_EVENTO_MS = 4 * 3600 * 1000; // se o servidor "dormiu" e acordou muito depois, não manda notificação velha
+
+function linhasDePalpite(db, email, ligaId, j, comoEstaValendo) {
+  const meusGrupos = Object.values(db.groups).filter((g) => g.liga === ligaId && g.membros[email]);
+  const linhas = [];
+  for (const g of meusGrupos.slice(0, 3)) {
+    const p = g.palpites[email] && g.palpites[email][j.id];
+    const nomeGrupo = meusGrupos.length > 1 ? ` (${g.nome})` : "";
+    if (!p) { linhas.push(`Sem palpite seu${nomeGrupo}`); continue; }
+    let txt = `Seu palpite${nomeGrupo}: ${p.h ?? 0}–${p.a ?? 0}`;
+    const pts = Pontuacao.pointsFor(p, j);
+    if (pts && comoEstaValendo === "final") txt += ` → ${pts.total} pts`;
+    else if (pts && comoEstaValendo === "live") txt += ` · vale ${pts.total} pts agora`;
+    linhas.push(txt);
+  }
+  return linhas;
+}
+
+/* Só CALCULA o que precisa ser enviado e atualiza o estado em memória do db — quem salva
+   e quem envia é o pollAll (salva primeiro, depois manda os pushes). */
+function prepararNotificacoes(db, ligaId, jogos) {
+  const resultado = { mudou: false, envios: [] };
+  if (!webpush || !VAPID) return resultado;
+  const agora = Date.now();
+  const grupos = Object.values(db.groups).filter((g) => g.liga === ligaId);
+  const inscritos = new Set();
+  for (const g of grupos) {
+    for (const email of Object.keys(g.membros)) if ((db.pushSubs[email] || []).length) inscritos.add(email);
+  }
+
+  const empurrar = (email, payload, topic, ttl) => {
+    for (const sub of db.pushSubs[email] || []) resultado.envios.push({ email, sub, payload, topic, ttl });
+  };
+
+  for (const j of jogos) {
+    const ko = new Date(j.kickoff).getTime();
+    const naJanela = ko > agora - JANELA_DEPOIS_MS && ko < agora + JANELA_ANTES_MS;
+    const prev = db.estadoJogos[j.id];
+    if (!naJanela) {
+      if (prev) { delete db.estadoJogos[j.id]; resultado.mudou = true; }
+      continue;
+    }
+    const atual = { s: j.status, h: j.hs, a: j.as };
+
+    if (!prev) {
+      // primeira vez que vemos esse jogo: só registra, não notifica (evita enxurrada no primeiro deploy)
+      db.estadoJogos[j.id] = atual;
+      resultado.mudou = true;
+    } else if (prev.s !== atual.s || prev.h !== atual.h || prev.a !== atual.a) {
+      db.estadoJogos[j.id] = atual;
+      resultado.mudou = true;
+
+      let tipo = null;
+      if (atual.s === "final" && prev.s !== "final") tipo = "fim";
+      else if (atual.s === "live" && prev.s === "scheduled") tipo = atual.h + atual.a > 0 ? "gol" : "inicio";
+      else if (atual.s === "live" && prev.s === "live" && (atual.h !== prev.h || atual.a !== prev.a)) tipo = "gol";
+
+      if (tipo && inscritos.size && agora - ko < IDADE_MAX_EVENTO_MS) {
+        const placar = `${j.ha} ${j.hs} x ${j.as} ${j.aa}`;
+        const minuto = j.minuto != null ? ` · ${j.minuto}'` : "";
+        const corrigido = atual.h < prev.h || atual.a < prev.a;
+        const marcou = atual.h > prev.h ? j.ha : atual.a > prev.a ? j.aa : null;
+        let titulo, fixa, ttl, valendo;
+        if (tipo === "inicio") { titulo = `🟢 Começou! ${j.ha} x ${j.aa}`; fixa = true; ttl = 600; valendo = "live"; }
+        else if (tipo === "gol") {
+          titulo = corrigido ? `🔄 Placar corrigido: ${placar}${minuto}` : `⚽ GOL${marcou ? ` do ${marcou}` : ""}! ${placar}${minuto}`;
+          fixa = true; ttl = 600; valendo = "live";
+        } else { titulo = `🏁 Fim de jogo: ${placar}`; fixa = false; ttl = 3600; valendo = "final"; }
+
+        for (const email of inscritos) {
+          const corpo = [`${j.home} x ${j.away}`, ...linhasDePalpite(db, email, ligaId, j, valendo)].join("\n");
+          empurrar(email, { title: titulo, body: corpo, tag: `jogo-${j.id}`, renotify: true, fixa, url: "/" }, `j${j.id}`, ttl);
+        }
+      }
+    }
+
+    // lembrete 1h antes — só pra quem ainda NÃO palpitou (as notificações acima chegam pra todo mundo, palpitou ou não)
+    const faltam = ko - agora;
+    if (j.status === "scheduled" && faltam > 0 && faltam <= 3600 * 1000) {
+      for (const g of grupos) {
+        for (const email of Object.keys(g.membros)) {
+          if (!(db.pushSubs[email] || []).length) continue;
+          if (g.palpites[email] && g.palpites[email][j.id]) continue;
+          const chave = `${email}:${j.id}`;
+          if (db.lembretesEnviados[chave]) continue;
+          db.lembretesEnviados[chave] = agora;
+          resultado.mudou = true;
+          empurrar(email, {
+            title: "⏰ Falta 1h pro jogo!",
+            body: `${j.home} x ${j.away} começa em breve e você ainda não deu seu palpite no ${g.nome}.`,
+            tag: `lembrete-${j.id}`, renotify: true, url: "/",
+          }, `l${j.id}`, 1800);
+        }
+      }
+    }
+  }
+
+  for (const [chave, quando] of Object.entries(db.lembretesEnviados)) {
+    if (agora - quando > 2 * 24 * 3600 * 1000) { delete db.lembretesEnviados[chave]; resultado.mudou = true; }
+  }
+  return resultado;
+}
+
+async function enviarPushes(envios) {
+  const mortos = [];
+  await Promise.all(envios.map(async (e) => {
+    try {
+      await webpush.sendNotification(e.sub, JSON.stringify(e.payload), { TTL: e.ttl || 600, urgency: "high", topic: e.topic });
+    } catch (err) {
+      if (err.statusCode === 404 || err.statusCode === 410) mortos.push({ email: e.email, endpoint: e.sub.endpoint });
+      else console.error("push falhou:", err.statusCode || err.message);
+    }
+  }));
+  if (mortos.length) { // aparelho desinstalou o app / revogou a permissão: limpa da lista
+    const db = await loadDb();
+    for (const m of mortos) db.pushSubs[m.email] = (db.pushSubs[m.email] || []).filter((s) => s.endpoint !== m.endpoint);
+    await saveDb(db);
+  }
 }
 
 /* ---------------- rotas de conta ---------------- */
@@ -382,6 +567,50 @@ app.get("/api/conta/grupos", autenticar, (req, res) => {
   res.json({ grupos: lista });
 });
 
+/* ---------------- rotas de notificação push ---------------- */
+
+app.get("/health", (req, res) => res.json({ ok: true })); // usado pra manter o servidor acordado (veja o README)
+
+app.get("/api/push/chave", (req, res) => {
+  res.json({ chave: VAPID ? VAPID.pub : null });
+});
+
+app.post("/api/push/inscrever", autenticar, async (req, res) => {
+  const sub = req.body && req.body.subscription;
+  if (!VAPID) return res.status(503).json({ erro: "notificações ainda não estão ligadas no servidor" });
+  if (!sub || typeof sub.endpoint !== "string" || !sub.endpoint.startsWith("https://") || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ erro: "inscrição inválida" });
+  }
+  const db = req.db;
+  const novo = { endpoint: sub.endpoint, keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) } };
+  const lista = (db.pushSubs[req.userEmail] = db.pushSubs[req.userEmail] || []);
+  const jaExiste = lista.some((x) => x.endpoint === novo.endpoint && x.keys.p256dh === novo.keys.p256dh && x.keys.auth === novo.keys.auth);
+  let mudou = false;
+  // se esse mesmo aparelho estava ligado a OUTRA conta, passa pra essa (um celular = uma conta)
+  for (const [email, subs] of Object.entries(db.pushSubs)) {
+    if (email === req.userEmail) continue;
+    const filtradas = subs.filter((x) => x.endpoint !== novo.endpoint);
+    if (filtradas.length !== subs.length) { db.pushSubs[email] = filtradas; mudou = true; }
+  }
+  if (!jaExiste) {
+    db.pushSubs[req.userEmail] = lista.filter((x) => x.endpoint !== novo.endpoint).concat(novo).slice(-10);
+    mudou = true;
+  }
+  if (mudou) await saveDb(db);
+  res.json({ ok: true });
+});
+
+app.post("/api/push/cancelar", autenticar, async (req, res) => {
+  const endpoint = req.body && req.body.endpoint;
+  const lista = req.db.pushSubs[req.userEmail] || [];
+  const filtrada = lista.filter((x) => x.endpoint !== endpoint);
+  if (filtrada.length !== lista.length) {
+    req.db.pushSubs[req.userEmail] = filtrada;
+    await saveDb(req.db);
+  }
+  res.json({ ok: true });
+});
+
 /* ---------------- rotas de placares/ligas ---------------- */
 
 app.get("/api/ligas", (req, res) => {
@@ -446,6 +675,9 @@ app.post("/api/grupos/:code/entrar", autenticar, async (req, res) => {
   if (!g) return res.status(404).json({ erro: "grupo não encontrado. confira o código" });
 
   if (!g.membros[req.userEmail]) {
+    if (g.removidos && g.removidos[req.userEmail]) {
+      return res.status(403).json({ erro: "você foi removido deste grupo pelo criador" });
+    }
     if (g.senhaHash !== hash(senha || "")) return res.status(401).json({ erro: "senha incorreta" });
     const meuNome = (db.users[req.userEmail].nome || "").trim().toLowerCase();
     const conflito = Object.keys(g.membros).some(
@@ -463,6 +695,7 @@ app.post("/api/grupos/:code/entrar", autenticar, async (req, res) => {
 app.get("/api/grupos/:code", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (!g.membros[req.userEmail]) return res.status(403).json({ erro: "você não faz parte desse grupo" });
   res.json({
     code: req.params.code, nome: g.nome, liga: g.liga,
     membros: Object.keys(g.membros).length,
@@ -488,6 +721,26 @@ app.post("/api/grupos/:code/trocar-senha", autenticar, async (req, res) => {
   if (g.criadoPorEmail !== req.userEmail) return res.status(403).json({ erro: "só quem criou o grupo pode trocar a senha" });
   if (!novaSenha || novaSenha.length < 3) return res.status(400).json({ erro: "escolha uma senha" });
   g.senhaHash = hash(novaSenha);
+  g.removidos = {}; // a senha nova é a nova "porta de entrada": quem foi removido antes pode voltar se receber a senha nova
+  await saveDb(db);
+  res.json({ ok: true });
+});
+
+/* só o criador pode tirar alguém do grupo. O participante perde os palpites daquele grupo e
+   não consegue voltar com a senha antiga (só depois que o criador trocar a senha do grupo). */
+app.post("/api/grupos/:code/membros/:id/remover", autenticar, async (req, res) => {
+  const db = req.db;
+  const g = db.groups[req.params.code];
+  if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (g.criadoPorEmail !== req.userEmail) return res.status(403).json({ erro: "só quem criou o grupo pode remover participantes" });
+  const alvo = Object.keys(g.membros).find((email) => idAnonimo(email) === req.params.id);
+  if (!alvo) return res.status(404).json({ erro: "participante não encontrado nesse grupo" });
+  if (alvo === req.userEmail) return res.status(400).json({ erro: "você é o criador do grupo — use \"Sair deste grupo\" se quiser sair" });
+  delete g.membros[alvo];
+  delete g.palpites[alvo];
+  g.removidos = g.removidos || {};
+  g.removidos[alvo] = Date.now();
+  for (const h of g.historico || []) h.linhas = (h.linhas || []).filter((l) => l.slug !== req.params.id);
   await saveDb(db);
   res.json({ ok: true });
 });
@@ -495,6 +748,7 @@ app.post("/api/grupos/:code/trocar-senha", autenticar, async (req, res) => {
 app.get("/api/grupos/:code/palpites", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (!g.membros[req.userEmail]) return res.status(403).json({ erro: "você não faz parte desse grupo" });
   res.json({ palpites: g.palpites[req.userEmail] || {} });
 });
 
@@ -525,6 +779,7 @@ function ultimaRodadaCompleta(jogos) {
 app.get("/api/grupos/:code/classificacao", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (!g.membros[req.userEmail]) return res.status(403).json({ erro: "você não faz parte desse grupo" });
   const jogos = (scoresCache[g.liga] && scoresCache[g.liga].jogos) || [];
   const membrosComNome = {};
   for (const email of Object.keys(g.membros)) {
@@ -557,6 +812,7 @@ app.get("/api/grupos/:code/classificacao", autenticar, (req, res) => {
 app.get("/api/grupos/:code/historico", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (!g.membros[req.userEmail]) return res.status(403).json({ erro: "você não faz parte desse grupo" });
   res.json({ historico: g.historico || [], meuId: idAnonimo(req.userEmail) });
 });
 
@@ -565,6 +821,7 @@ app.get("/api/grupos/:code/historico", autenticar, (req, res) => {
 app.get("/api/grupos/:code/jogo/:jogoId/palpites", autenticar, (req, res) => {
   const g = req.db.groups[req.params.code];
   if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (!g.membros[req.userEmail]) return res.status(403).json({ erro: "você não faz parte desse grupo" });
   const jogos = (scoresCache[g.liga] && scoresCache[g.liga].jogos) || [];
   const jogo = jogos.find((j) => j.id === req.params.jogoId);
   if (!jogo) return res.status(404).json({ erro: "jogo não encontrado" });
@@ -631,8 +888,18 @@ app.listen(PORT, () => {
   if (!API_KEY) {
     console.warn("⚠️  FOOTBALL_DATA_API_KEY não definida — os placares não vão atualizar. Veja o README.");
   }
-  pollAll();
-  setInterval(pollAll, POLL_INTERVAL_MS);
+  iniciarPush().catch((e) => console.error("push:", e.message)).finally(() => {
+    pollAll();
+    setInterval(pollAll, POLL_INTERVAL_MS);
+  });
   pollStandings();
   setInterval(pollStandings, 10 * 60 * 1000); // tabela muda pouco, atualiza a cada 10 min
+
+  // O plano grátis do Render "dorme" depois de ~15 min sem ninguém acessando — e servidor dormindo
+  // não vê gol nenhum, ou seja, não manda notificação. Esse ping de tempos em tempos (na própria URL
+  // pública, que o Render informa em RENDER_EXTERNAL_URL) mantém o servidor acordado. Pra desligar: MANTER_ACORDADO=0
+  const urlPublica = process.env.RENDER_EXTERNAL_URL;
+  if (urlPublica && process.env.MANTER_ACORDADO !== "0") {
+    setInterval(() => { fetch(`${urlPublica}/health`).catch(() => {}); }, 10 * 60 * 1000);
+  }
 });
