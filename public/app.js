@@ -38,6 +38,8 @@ const state = {
   codigoRecuperacaoParaMostrar: null,
   copiadoCodigoRecuperacao: false,
   mensagemConta: "",
+  pushAtivo: false, // este aparelho está inscrito nas notificações do servidor?
+  pushOcupado: false,
 };
 
 let pollTimer = null;
@@ -100,6 +102,7 @@ async function iniciar() {
     try {
       const eu = await buscarContaComEspera(4);
       state.conta = eu;
+      sincronizarPush();
       const g = await api("/api/conta/grupos");
       state.meusGrupos = g.grupos || [];
       const ultimoCode = localStorage.getItem("bolao_ultimo_grupo");
@@ -188,7 +191,17 @@ async function atualizarDadosBolao() {
       } catch { /* mantém cache */ }
     }
     render();
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    if (e.status === 403 && state.grupo) { // o criador te removeu desse grupo
+      const nome = state.grupo.nome;
+      state.meusGrupos = state.meusGrupos.filter((g) => g.code !== state.grupo.code);
+      if (localStorage.getItem("bolao_ultimo_grupo") === state.grupo.code) localStorage.removeItem("bolao_ultimo_grupo");
+      trocarDeGrupo();
+      alert(`Você foi removido do grupo "${nome}" pelo criador.`);
+      return;
+    }
+    console.error(e);
+  }
 }
 
 /* ---------------- conta ---------------- */
@@ -247,6 +260,7 @@ window.entrarConta = async function () {
     state.carregando = false;
     state.view = "home";
     render();
+    sincronizarPush();
   } catch (e) {
     state.erro = e.message;
     state.carregando = false;
@@ -276,6 +290,7 @@ window.recuperarSenha = async function () {
 };
 
 window.sairDaConta = async function () {
+  try { await desligarPushDesteAparelho(); } catch { /* segue mesmo assim */ }
   try { await api("/api/conta/sair", { method: "POST" }); } catch { /* segue mesmo assim */ }
   pararPolling();
   localStorage.removeItem("bolao_token");
@@ -403,6 +418,20 @@ window.trocarSenhaGrupo = async function () {
     alert("Senha do grupo atualizada!");
   } catch (e) {
     alert("Não consegui trocar a senha: " + e.message);
+  }
+};
+
+window.removerParticipante = async function (i) {
+  const l = state.classificacao[i];
+  if (!l || !state.grupo || !state.grupo.souCriador || l.slug === state.meuId) return;
+  if (!confirm(`Remover ${l.jogador} do grupo "${state.grupo.nome}"?\n\nOs palpites dessa pessoa neste grupo serão apagados, e ela não vai conseguir voltar com a senha atual (só depois que você trocar a senha do grupo).`)) return;
+  try {
+    await api(`/api/grupos/${state.grupo.code}/membros/${l.slug}/remover`, { method: "POST" });
+    state.graficoAberto = null;
+    state.graficoCache = {};
+    await atualizarDadosBolao();
+  } catch (e) {
+    alert("Não consegui remover essa pessoa: " + e.message);
   }
 };
 
@@ -538,8 +567,104 @@ window.ativarLembretes = async function () {
   render();
 };
 
+/* ---------------- notificações com o app fechado (push) ---------------- */
+
+function pushSuportado() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+function ehIos() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+function appInstalado() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+function urlBase64ParaBytes(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+async function assinaturaDoAparelho() {
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+/* se esse aparelho já tinha ligado as notificações, garante que o servidor sabe disso
+   pra conta que está logada agora (e atualiza o botão nas Configurações) */
+async function sincronizarPush() {
+  if (!pushSuportado() || Notification.permission !== "granted" || !state.token) return;
+  try {
+    const sub = await assinaturaDoAparelho();
+    state.pushAtivo = !!sub;
+    if (sub) await api("/api/push/inscrever", { method: "POST", body: { subscription: sub.toJSON() } });
+    render();
+  } catch (e) { console.error("push:", e); }
+}
+
+async function desligarPushDesteAparelho() {
+  if (!pushSuportado()) return;
+  const sub = await assinaturaDoAparelho();
+  if (!sub) return;
+  try { await api("/api/push/cancelar", { method: "POST", body: { endpoint: sub.endpoint } }); } catch { /* segue */ }
+  await sub.unsubscribe();
+  state.pushAtivo = false;
+}
+
+window.ativarPush = async function () {
+  if (state.pushOcupado) return;
+  if (ehIos() && !appInstalado()) {
+    alert("No iPhone, primeiro toque em Compartilhar → \"Adicionar à Tela de Início\", abra o app por esse ícone e ative as notificações de dentro dele.");
+    return;
+  }
+  if (!pushSuportado()) { alert("Esse navegador não suporta notificações com o app fechado."); return; }
+  state.pushOcupado = true; render();
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error("a permissão foi negada — libere as notificações nas configurações do celular/navegador");
+    const { chave } = await api("/api/push/chave");
+    if (!chave) throw new Error("o servidor ainda não está com as notificações ligadas, tente de novo daqui a pouco");
+    const reg = await navigator.serviceWorker.ready;
+    const antiga = await reg.pushManager.getSubscription();
+    if (antiga) await antiga.unsubscribe(); // sempre cria uma nova, pra não ficar presa a uma chave antiga
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ParaBytes(chave) });
+    await api("/api/push/inscrever", { method: "POST", body: { subscription: sub.toJSON() } });
+    state.pushAtivo = true;
+  } catch (e) {
+    alert("Não consegui ativar as notificações: " + e.message);
+  }
+  state.pushOcupado = false; render();
+};
+
+window.desativarPush = async function () {
+  if (state.pushOcupado) return;
+  state.pushOcupado = true; render();
+  try { await desligarPushDesteAparelho(); } catch (e) { alert("Não consegui desativar agora: " + e.message); }
+  state.pushOcupado = false; render();
+};
+
+function cartaoNotificacoes() {
+  const explicacao = `<p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Receba no celular, mesmo com o app fechado: início do jogo, cada gol (com o placar e quantos pontos o seu palpite vale naquele momento), o fim de jogo com seus pontos, e um aviso 1h antes se você ainda não palpitou. Chega pra todo mundo do grupo, tendo palpitado ou não.</p>`;
+  let corpo;
+  if (ehIos() && !appInstalado()) {
+    corpo = `${explicacao}<p class="f-mono" style="font-size:12px;color:var(--ink);margin:0;line-height:1.5">📲 No iPhone isso só funciona com o app instalado: toque em <b>Compartilhar</b> → <b>Adicionar à Tela de Início</b>, abra o ALLeagues por esse ícone e volte aqui.</p>`;
+  } else if (!pushSuportado()) {
+    corpo = `${explicacao}<p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0">Esse navegador não suporta notificações com o app fechado.</p>`;
+  } else if (statusNotificacao() === "denied") {
+    corpo = `${explicacao}<p class="f-mono" style="font-size:12px;color:var(--live);margin:0">Notificações bloqueadas nas configurações do celular/navegador — libere por lá e volte aqui.</p>`;
+  } else if (state.pushAtivo) {
+    corpo = `<p class="f-mono" style="font-size:12px;color:var(--ink);margin:0 0 10px">🔔 Ativado neste aparelho — você recebe início, gols e fim dos jogos dos seus grupos, com o app fechado.</p>
+      <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="desativarPush()" ${state.pushOcupado ? "disabled" : ""}>${state.pushOcupado ? "Aguarde…" : "Desativar neste aparelho"}</button>`;
+  } else {
+    corpo = `${explicacao}<button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:12px" onclick="ativarPush()" ${state.pushOcupado ? "disabled" : ""}>${state.pushOcupado ? "Aguarde…" : "🔔 Ativar notificações dos jogos"}</button>`;
+  }
+  return `
+      <div class="card-panel">
+        <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 10px">NOTIFICAÇÕES DOS JOGOS</p>
+        ${corpo}
+      </div>`;
+}
+
 function verificarLembretes() {
-  if (statusNotificacao() !== "granted" || !state.grupo) return;
+  if (statusNotificacao() !== "granted" || !state.grupo || state.pushAtivo) return; // com push ligado, o servidor já manda esse lembrete
   let enviados = [];
   try { enviados = JSON.parse(localStorage.getItem("bolao_lembretes_enviados") || "[]"); } catch {}
   const agora = Date.now();
@@ -1129,6 +1254,9 @@ function abaClassificacao() {
                 ${state.graficoAberto === l.slug
                   ? (state.graficoCache[l.slug] ? montarGraficoInline(state.graficoCache[l.slug], l.slug) : `<div style="padding:20px;text-align:center"><span class="f-mono" style="color:var(--paper-soft);font-size:12px">carregando gráfico…</span></div>`)
                   : ""}
+                ${state.graficoAberto === l.slug && state.grupo.souCriador && l.slug !== state.meuId
+                  ? `<div style="padding:4px 14px 12px"><button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--live)" onclick="removerParticipante(${i})">✕ Remover ${l.jogador} do grupo</button></div>`
+                  : ""}
               </div>`).join("")}
           </div>
         `}
@@ -1148,7 +1276,8 @@ const FAQ = [
   { p: "Esqueci a senha da minha conta, e agora?", r: "Use 'esqueci minha senha' na tela de login, com o código de recuperação que apareceu quando você criou a conta. Sem esse código, infelizmente não tem como recuperar — guarde ele em lugar seguro." },
   { p: "Como saio de um grupo?", r: "Em Configurações → Sair deste grupo. Isso apaga seus palpites daquele grupo (os outros participantes continuam normalmente)." },
   { p: "Se eu trocar meu apelido, perco meus pontos?", r: "Não — agora sua identidade é a conta (email), não o apelido. Pode trocar o apelido à vontade em Configurações que seus pontos continuam." },
-  { p: "Como funciona o lembrete de palpite?", r: "Ative em Configurações → Lembrete de palpite. Quando faltar 1h pra um jogo que você ainda não deu palpite, aparece uma notificação — só funciona com essa página aberta em alguma aba." },
+  { p: "Como funcionam as notificações dos jogos?", r: "Ative em Configurações → Notificações dos jogos. Você recebe no celular, mesmo com o app fechado, o início do jogo, cada gol e o fim de jogo (com os pontos do seu palpite) — palpitando ou não — e um aviso 1h antes se ainda não palpitou. Cada jogo ocupa uma notificação só, que vai sendo atualizada com o placar mais recente. No iPhone, instale o app antes (Compartilhar → Adicionar à Tela de Início)." },
+  { p: "Como removo alguém do meu grupo?", r: "Só quem criou o grupo pode. Vá em Configurações → Participantes e toque em Remover ao lado do nome (ou toque no nome da pessoa na Classificação). A pessoa perde os palpites daquele grupo e não consegue voltar com a senha atual — se quiser deixar entrar de novo, troque a senha do grupo." },
   { p: "Posso jogar em mais de um bolão ao mesmo tempo?", r: "Sim — sua conta pode participar de quantos grupos quiser. A tela inicial mostra 'Seus grupos' com todos eles, e dá pra sincronizar o palpite entre grupos da mesma liga em Configurações, pra não precisar apostar duas vezes." },
 ];
 
@@ -1208,6 +1337,17 @@ function abaConfig() {
               <span class="f-mono" style="font-size:13px;color:var(--ink)">${g.nome} <span style="color:var(--ink-soft)">(${g.code})</span></span>
             </label>`).join("")}
         `) : ""}
+        ${state.grupo.souCriador ? itemMenu("participantes", "👥", "Participantes", `${state.classificacao.length}`, `
+          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Só você, que criou o grupo, vê esses botões. Quem for removido perde os palpites daqui e não consegue voltar com a senha atual.</p>
+          ${state.classificacao.map((l, i) => `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid rgba(28,27,20,0.08)">
+              <div style="display:flex;align-items:center;gap:10px;min-width:0">
+                ${avatarHtml(l.jogador, l.foto, 28)}
+                <span class="f-mono" style="font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.jogador}${l.slug === state.meuId ? " (você)" : ""}</span>
+              </div>
+              ${l.slug === state.meuId ? "" : `<button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--live);flex-shrink:0" onclick="removerParticipante(${i})">✕ Remover</button>`}
+            </div>`).join("")}
+        `) : ""}
         ${itemMenu("duvidas", "❓", "Dúvidas frequentes", null, `
           ${FAQ.map((item) => `
             <div style="margin-bottom:10px">
@@ -1253,20 +1393,7 @@ function abaConfig() {
         </a>
       </div>
 
-      <div class="card-panel">
-        <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 10px">LEMBRETE DE PALPITE</p>
-        ${statusNotificacao() === "granted" ? `
-          <p class="f-mono" style="font-size:12px;color:var(--ink);margin:0">🔔 Ativado — você recebe um aviso 1h antes de cada jogo que ainda não palpitou.</p>
-        ` : statusNotificacao() === "denied" ? `
-          <p class="f-mono" style="font-size:12px;color:var(--live);margin:0">Notificações bloqueadas nas configurações do navegador.</p>
-        ` : statusNotificacao() === "sem-suporte" ? `
-          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0">Esse navegador não suporta notificações.</p>
-        ` : `
-          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px">Receba um aviso 1h antes de cada jogo que você ainda não deu palpite.</p>
-          <button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:12px" onclick="ativarLembretes()">Ativar lembretes</button>
-        `}
-        <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-top:10px;opacity:.8">funciona enquanto essa página estiver aberta no navegador.</p>
-      </div>
+      ${cartaoNotificacoes()}
     </div>`;
 }
 window.toggleModoEscuro = function () {
