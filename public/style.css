@@ -88,3 +88,8 @@ button, input { font-family: 'Inter', sans-serif; border: none; }
 }
 .sheet-painel.aberta { transform: translateY(0); }
 .sheet-alca { width: 40px; height: 4px; border-radius: 2px; background: rgba(28,27,20,0.25); margin: 0 auto 10px; }
+
+/* 4 abas cabem em telas estreitas */
+@media (max-width: 480px) {
+  .tabbar button { padding: 10px 2px; font-size: 11px; gap: 3px; }
+}

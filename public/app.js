@@ -38,6 +38,9 @@ const state = {
   codigoRecuperacaoParaMostrar: null,
   copiadoCodigoRecuperacao: false,
   mensagemConta: "",
+  tabelaPorLiga: {}, // ligaId -> { atualizadoEm, grupos }
+  seguindoPorLiga: {}, // ligaId -> { tudo, times: [teamId] }
+  escalacaoCache: {}, // jogoId -> { disponivel, casa, fora } | { erro }
   pushAtivo: false, // este aparelho está inscrito nas notificações do servidor?
   pushOcupado: false,
 };
@@ -190,6 +193,18 @@ async function atualizarDadosBolao() {
         state.detalhesJogoCache[state.detalhesJogoAberto] = r.linhas || [];
       } catch { /* mantém cache */ }
     }
+    if (state.jogoAberto) { // folha de um jogo aberta: mantém palpites e escalação em dia
+      const gAberto = (state.scores.jogos || []).find((j) => j.id === state.jogoAberto);
+      if (gAberto && gAberto.status !== "scheduled") {
+        try {
+          const r = await api(`/api/grupos/${state.grupo.code}/jogo/${state.jogoAberto}/palpites`);
+          state.detalhesJogoCache[state.jogoAberto] = r.linhas || [];
+        } catch { /* mantém cache */ }
+        const e = state.escalacaoCache[state.jogoAberto];
+        if (!e || e.erro || !e.disponivel) await carregarEscalacao(state.jogoAberto, false);
+      }
+    }
+    if (state.abaBolao === "tabela") await carregarTabela(false); // a tabela muda quando um jogo termina
     render();
   } catch (e) {
     if (e.status === 403 && state.grupo) { // o criador te removeu desse grupo
@@ -386,7 +401,135 @@ window.abrirGrupoLocal = async function (code) {
   } catch { /* segue sem essa info, não é crítico */ }
 };
 
-window.setAbaBolao = function (aba) { state.abaBolao = aba; render(); };
+window.setAbaBolao = function (aba) {
+  state.abaBolao = aba;
+  render();
+  if (aba === "tabela") { carregarTabela(true); carregarSeguindo(); }
+};
+
+/* ---------------- tabela do campeonato + seguir times ---------------- */
+
+async function carregarTabela(mostrarErro) {
+  if (!state.grupo) return;
+  const liga = state.grupo.liga;
+  try {
+    state.tabelaPorLiga[liga] = await api(`/api/ligas/${liga}/tabela`);
+  } catch (e) {
+    if (mostrarErro && !state.tabelaPorLiga[liga]) state.tabelaPorLiga[liga] = { erro: true, grupos: [] };
+  }
+  render();
+}
+
+async function carregarSeguindo() {
+  if (!state.grupo) return;
+  const liga = state.grupo.liga;
+  try {
+    state.seguindoPorLiga[liga] = await api(`/api/seguindo/${liga}`);
+    render();
+  } catch { /* mantém */ }
+}
+
+function estaSeguindo(liga, timeId) {
+  const s = state.seguindoPorLiga[liga];
+  return !!s && (s.tudo || (s.times || []).includes(timeId));
+}
+
+window.alternarSeguirTime = async function (timeId) {
+  const liga = state.grupo.liga;
+  const antes = state.seguindoPorLiga[liga] || { tudo: false, times: [] };
+  const seguir = !estaSeguindo(liga, timeId);
+  // atualiza a tela na hora; se o servidor falhar, volta atrás
+  let times = antes.times || [];
+  let tudo = antes.tudo;
+  if (seguir) { if (!tudo && !times.includes(timeId)) times = [...times, timeId]; }
+  else if (tudo) {
+    const todos = ((state.tabelaPorLiga[liga] || {}).grupos || []).flatMap((g) => g.linhas.map((l) => l.timeId));
+    times = todos.filter((id) => id && id !== timeId);
+    tudo = false;
+  } else times = times.filter((id) => id !== timeId);
+  state.seguindoPorLiga[liga] = { tudo, times };
+  render();
+  try {
+    state.seguindoPorLiga[liga] = await api(`/api/seguindo/${liga}/time/${timeId}`, { method: "POST", body: { seguir } });
+  } catch (e) {
+    state.seguindoPorLiga[liga] = antes;
+    alert("Não consegui salvar agora: " + e.message);
+  }
+  render();
+};
+
+window.alternarSeguirTudo = async function () {
+  const liga = state.grupo.liga;
+  const antes = state.seguindoPorLiga[liga] || { tudo: false, times: [] };
+  const seguir = !antes.tudo;
+  state.seguindoPorLiga[liga] = { tudo: seguir, times: [] };
+  render();
+  try {
+    state.seguindoPorLiga[liga] = await api(`/api/seguindo/${liga}/tudo`, { method: "POST", body: { seguir } });
+  } catch (e) {
+    state.seguindoPorLiga[liga] = antes;
+    alert("Não consegui salvar agora: " + e.message);
+  }
+  render();
+};
+
+function abaTabela() {
+  const liga = state.grupo.liga;
+  const info = LIGAS[liga] || {};
+  const t = state.tabelaPorLiga[liga];
+  const seg = state.seguindoPorLiga[liga] || { tudo: false, times: [] };
+  const botao = (timeId) => {
+    const sim = estaSeguindo(liga, timeId);
+    return `<button class="chip f-display" style="text-transform:uppercase;font-size:10px;padding:3px 8px;flex-shrink:0;${sim ? "background:var(--amber);color:var(--ink)" : "background:var(--pitch);color:var(--paper-soft)"}" onclick="alternarSeguirTime(${timeId})">${sim ? "✓ seguindo" : "seguir"}</button>`;
+  };
+  let corpo;
+  if (!t) corpo = `<p class="f-mono" style="color:var(--ink-soft);font-size:13px">carregando a tabela…</p>`;
+  else if (t.erro || !t.grupos || t.grupos.length === 0) corpo = `<p class="f-mono" style="color:var(--ink-soft);font-size:13px">A tabela ainda não está disponível — o servidor busca de tempos em tempos, tenta de novo daqui a pouco.</p>`;
+  else {
+    corpo = t.grupos.map((g) => `
+      ${g.nome ? `<p class="f-display" style="font-size:13px;color:var(--ink);text-transform:uppercase;margin:12px 0 4px">${g.nome}</p>` : ""}
+      <div class="ticket" style="padding:6px 10px">
+        <div class="f-mono" style="display:grid;grid-template-columns:20px 1fr repeat(6,24px);gap:4px;font-size:10px;color:var(--ink-soft);padding:4px 0;border-bottom:1px solid rgba(28,27,20,0.12)">
+          <span>#</span><span>TIME</span><span style="text-align:center">J</span><span style="text-align:center">V</span><span style="text-align:center">E</span><span style="text-align:center">D</span><span style="text-align:center">SG</span><span style="text-align:center;font-weight:700">PTS</span>
+        </div>
+        ${g.linhas.map((l) => `
+          <div style="display:grid;grid-template-columns:20px 1fr repeat(6,24px);gap:4px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(28,27,20,0.07)">
+            <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">${l.pos}</span>
+            <div style="display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap">
+              <div style="display:flex;align-items:center;gap:6px;min-width:0">
+                ${l.escudo ? `<img src="${l.escudo}" alt="" style="width:18px;height:18px;object-fit:contain;flex-shrink:0" onerror="this.style.display='none'" />` : ""}
+                <span class="f-display" style="font-size:13px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${l.nome}</span>
+              </div>
+              ${l.timeId ? botao(l.timeId) : ""}
+            </div>
+            <span class="f-mono" style="font-size:11px;text-align:center;color:var(--ink-soft)">${l.jogos}</span>
+            <span class="f-mono" style="font-size:11px;text-align:center;color:var(--ink-soft)">${l.v}</span>
+            <span class="f-mono" style="font-size:11px;text-align:center;color:var(--ink-soft)">${l.e}</span>
+            <span class="f-mono" style="font-size:11px;text-align:center;color:var(--ink-soft)">${l.d}</span>
+            <span class="f-mono" style="font-size:11px;text-align:center;color:var(--ink-soft)">${l.sg > 0 ? "+" + l.sg : l.sg}</span>
+            <span class="f-score" style="font-size:16px;text-align:center;color:var(--ink)">${l.pts}</span>
+          </div>`).join("")}
+      </div>`).join("");
+  }
+  return `
+    <div class="wrap" style="padding:18px 20px 30px">
+      <h2 class="f-display" style="text-transform:uppercase;font-size:22px;color:var(--ink);margin:0">${info.flag || ""} Tabela · ${info.name || ""}</h2>
+      <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:2px 0 12px">
+        ${t && t.atualizadoEm ? `atualizada às ${new Date(t.atualizadoEm).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} · e de novo sempre que um jogo termina` : "aguardando a primeira atualização"}
+      </p>
+      <div class="ticket" style="margin-bottom:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="min-width:0">
+            <div class="f-display" style="font-size:14px;color:var(--ink);text-transform:uppercase">🔔 Notificações por time</div>
+            <div class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-top:2px;line-height:1.4">Você só recebe aviso dos jogos dos times que segue.</div>
+          </div>
+          <button class="chip f-display" style="text-transform:uppercase;font-size:12px;flex-shrink:0;${seg.tudo ? "background:var(--amber);color:var(--ink)" : "background:var(--pitch);color:var(--paper-soft)"}" onclick="alternarSeguirTudo()">${seg.tudo ? "✓ seguindo tudo" : "seguir tudo"}</button>
+        </div>
+        ${state.pushAtivo ? "" : `<div class="f-mono" style="font-size:11px;color:var(--live);margin-top:8px;line-height:1.4">As notificações ainda não estão ativadas neste aparelho — ative em Configurações → Notificações dos jogos.</div>`}
+      </div>
+      ${corpo}
+    </div>`;
+}
 
 window.trocarDeGrupo = function () {
   pararPolling();
@@ -642,7 +785,7 @@ window.desativarPush = async function () {
 };
 
 function cartaoNotificacoes() {
-  const explicacao = `<p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Receba no celular, mesmo com o app fechado: início do jogo, cada gol (com o placar e quantos pontos o seu palpite vale naquele momento), o fim de jogo com seus pontos, e um aviso 1h antes se você ainda não palpitou. Chega pra todo mundo do grupo, tendo palpitado ou não.</p>`;
+  const explicacao = `<p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Receba no celular, mesmo com o app fechado: início do jogo, cada gol (com o placar e quantos pontos o seu palpite vale naquele momento), o fim de jogo com seus pontos, e um aviso 1h antes se você ainda não palpitou. <b>Só dos times que você segue:</b> escolha na aba <b>Tabela</b> (botão "seguir" ao lado de cada time, ou "seguir tudo"). Chega tendo palpitado ou não.</p>`;
   let corpo;
   if (ehIos() && !appInstalado()) {
     corpo = `${explicacao}<p class="f-mono" style="font-size:12px;color:var(--ink);margin:0;line-height:1.5">📲 No iPhone isso só funciona com o app instalado: toque em <b>Compartilhar</b> → <b>Adicionar à Tela de Início</b>, abra o ALLeagues por esse ícone e volte aqui.</p>`;
@@ -651,7 +794,7 @@ function cartaoNotificacoes() {
   } else if (statusNotificacao() === "denied") {
     corpo = `${explicacao}<p class="f-mono" style="font-size:12px;color:var(--live);margin:0">Notificações bloqueadas nas configurações do celular/navegador — libere por lá e volte aqui.</p>`;
   } else if (state.pushAtivo) {
-    corpo = `<p class="f-mono" style="font-size:12px;color:var(--ink);margin:0 0 10px">🔔 Ativado neste aparelho — você recebe início, gols e fim dos jogos dos seus grupos, com o app fechado.</p>
+    corpo = `<p class="f-mono" style="font-size:12px;color:var(--ink);margin:0 0 10px">🔔 Ativado neste aparelho — você recebe início, gols e fim dos jogos dos times que você segue (aba Tabela), com o app fechado.</p>
       <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="desativarPush()" ${state.pushOcupado ? "disabled" : ""}>${state.pushOcupado ? "Aguarde…" : "Desativar neste aparelho"}</button>`;
   } else {
     corpo = `${explicacao}<button class="chip btn-amber f-display" style="text-transform:uppercase;font-size:12px" onclick="ativarPush()" ${state.pushOcupado ? "disabled" : ""}>${state.pushOcupado ? "Aguarde…" : "🔔 Ativar notificações dos jogos"}</button>`;
@@ -1007,6 +1150,11 @@ function statusJogoHtml(jogoId) {
 window.abrirFolhaAposta = function (jogoId, haId, aaId) {
   state.jogoAberto = jogoId;
   render();
+  const jogo = (state.scores.jogos || []).find((j) => j.id === jogoId);
+  if (jogo && jogo.status !== "scheduled") { // jogo ao vivo/encerrado: escalação + o que cada um apostou
+    carregarEscalacao(jogoId, true);
+    carregarPalpitesDoJogo(jogoId);
+  }
   [haId, aaId].forEach((teamId) => {
     if (!teamId || state.formaCache[teamId]) return;
     api(`/api/times/${teamId}/ultimos`)
@@ -1025,6 +1173,54 @@ window.fecharFolhaAposta = function () {
     render();
   }
 };
+
+async function carregarEscalacao(jogoId, comRender) {
+  try {
+    state.escalacaoCache[jogoId] = await api(`/api/jogos/${jogoId}/escalacao`);
+  } catch {
+    if (!state.escalacaoCache[jogoId]) state.escalacaoCache[jogoId] = { erro: true };
+  }
+  if (comRender) render();
+}
+
+async function carregarPalpitesDoJogo(jogoId) {
+  try {
+    const r = await api(`/api/grupos/${state.grupo.code}/jogo/${jogoId}/palpites`);
+    state.detalhesJogoCache[jogoId] = r.linhas || [];
+  } catch (e) {
+    state.detalhesJogoCache[jogoId] = { erro: e.message || "não consegui carregar" };
+  }
+  render();
+}
+
+function escHtml(x) {
+  return String(x ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function colunaEscalacao(nome, t) {
+  const linha = (p) => `<div style="display:flex;gap:6px;padding:2px 0"><span class="f-mono" style="font-size:11px;color:var(--ink-soft);width:18px;text-align:right;flex-shrink:0">${p.camisa ?? ""}</span><span class="f-mono" style="font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(p.nome)}</span></div>`;
+  const sub = [t.formacao, t.tecnico ? `téc. ${escHtml(t.tecnico)}` : ""].filter(Boolean).join(" · ");
+  return `
+    <div style="min-width:0">
+      <p class="f-display" style="font-size:13px;color:var(--ink);text-transform:uppercase;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(nome)}</p>
+      <p class="f-mono" style="font-size:11px;color:var(--ink-soft);margin:0 0 6px;min-height:14px">${sub}</p>
+      ${t.titulares.length ? t.titulares.map(linha).join("") : `<span class="f-mono" style="font-size:11px;color:var(--ink-soft)">sem dados</span>`}
+      ${t.reservas.length ? `<p class="f-mono" style="font-size:10px;color:var(--ink-soft);margin:8px 0 2px;text-transform:uppercase">Reservas</p>${t.reservas.map(linha).join("")}` : ""}
+    </div>`;
+}
+
+function escalacaoHtml(g) {
+  const e = state.escalacaoCache[g.id];
+  const aviso = (txt) => `<span class="f-mono" style="font-size:12px;color:var(--ink-soft)">${txt}</span>`;
+  let corpo;
+  if (!e) corpo = aviso("carregando…");
+  else if (e.erro) corpo = aviso("Não consegui carregar a escalação agora.");
+  else if (!e.disponivel) corpo = aviso("A escalação deste jogo ainda não está disponível.");
+  else corpo = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">${colunaEscalacao(g.home, e.casa)}${colunaEscalacao(g.away, e.fora)}</div>`;
+  return `
+    <p class="f-display" style="font-size:13px;color:var(--ink);text-transform:uppercase;margin:0 0 8px">Escalações</p>
+    ${corpo}`;
+}
 
 function formaTimeHtml(nome, teamId) {
   const jogos = state.formaCache[teamId];
@@ -1071,7 +1267,7 @@ function montarFolhaAposta(g) {
           <span class="f-mono" style="font-size:11px;color:var(--ink-soft)">${fmtKickoff(g.kickoff)}</span>
           <button class="icon-btn" style="background:var(--paper-soft);color:var(--ink)" onclick="fecharFolhaAposta()">✕</button>
         </div>
-        <div style="padding:0 18px 24px;overflow-y:auto;flex:1">
+        <div id="sheet-scroll" style="padding:0 18px 24px;overflow-y:auto;flex:1">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:16px">
             <div style="flex:1;min-width:0;text-align:center">
               ${escudoHtml(g.haEscudo, g.ha, 44)}
@@ -1105,8 +1301,20 @@ function montarFolhaAposta(g) {
           <div style="padding-top:14px;border-top:1px dashed rgba(28,27,20,0.18);margin-bottom:14px">
             ${probabilidadeHtml(g.probabilidade, g.ha, g.aa)}
           </div>` : `
-          <div style="text-align:center;margin-bottom:16px">
+          <div style="text-align:center;margin:-4px 0 10px">
+            ${g.status === "live"
+              ? `<span class="f-display" style="color:var(--live);font-weight:700;font-size:12px;display:inline-flex;align-items:center;gap:5px"><span class="live-dot"></span>AO VIVO${g.minuto != null ? ` · ${g.minuto}${g.acrescimo ? "+" + g.acrescimo : ""}'` : ""}</span>`
+              : g.status === "final" ? `<span class="f-mono" style="color:var(--ink-soft);font-size:12px">✓ encerrado</span>` : ""}
+          </div>
+          <div style="text-align:center;margin-bottom:14px">
             <span class="f-mono" style="font-size:12px;color:var(--ink-soft)">seu palpite foi ${state.meusPalpites[g.id] ? `${state.meusPalpites[g.id].h} – ${state.meusPalpites[g.id].a}` : "não registrado"}</span>
+          </div>
+          <div style="padding-top:12px;border-top:1px dashed rgba(28,27,20,0.18);margin-bottom:14px">
+            <p class="f-display" style="font-size:13px;color:var(--ink);text-transform:uppercase;margin:0">Palpites do grupo</p>
+            ${montarDetalhesJogoHtml(state.detalhesJogoCache[g.id])}
+          </div>
+          <div style="padding-top:12px;border-top:1px dashed rgba(28,27,20,0.18);margin-bottom:14px">
+            ${escalacaoHtml(g)}
           </div>`}
 
           <div style="padding-top:4px">
@@ -1145,7 +1353,7 @@ function cartaoJogo(g) {
     : "você ainda não palpitou";
 
   return `
-    <div class="ticket" ${!bloqueado ? `onclick="abrirFolhaAposta('${g.id}',${g.haId || "null"},${g.aaId || "null"})" style="cursor:pointer"` : ""}>
+    <div class="ticket" onclick="abrirFolhaAposta('${g.id}',${g.haId || "null"},${g.aaId || "null"})" style="cursor:pointer">
       <div style="display:flex;justify-content:space-between;margin-bottom:10px">
         <span class="f-mono" style="color:var(--ink-soft);font-size:11px">${fmtKickoff(g.kickoff)}</span>
         ${statusHtml}
@@ -1176,11 +1384,12 @@ function cartaoJogo(g) {
             ${pts ? `<span class="badge" style="background:${pts.total > 0 ? "var(--amber)" : "transparent"};color:var(--ink)">${pts.total > 0 ? `+${pts.total} pts` : "sem pontos"}</span>` : ""}
           </div>
           ${pts && pts.tags.length ? `<div class="f-mono" style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">${pts.tags.join(" · ")}</div>` : ""}
-          <div onclick="toggleDetalhesJogo('${g.id}')" style="cursor:pointer;text-align:center;font-size:22px;color:var(--ink-soft);margin-top:4px">
+          <div onclick="event.stopPropagation();toggleDetalhesJogo('${g.id}')" style="cursor:pointer;text-align:center;font-size:22px;color:var(--ink-soft);margin-top:4px">
             <div class="f-score" style="font-size:22px">🔒 ${state.meusPalpites[g.id]?.h ?? "–"} – ${state.meusPalpites[g.id]?.a ?? "–"}</div>
             <div class="f-mono" style="font-size:10px;color:var(--ink-soft);margin-top:2px">${state.detalhesJogoAberto === g.id ? "▾" : "▸"} ver palpite de todo mundo</div>
           </div>
           ${state.detalhesJogoAberto === g.id ? montarDetalhesJogoHtml(state.detalhesJogoCache[g.id]) : ""}
+          ${g.status === "live" ? `<div class="f-mono" style="font-size:11px;color:var(--ink-soft);text-align:center;margin-top:8px">▸ toque no jogo: escalações e palpites do grupo</div>` : ""}
         </div>
       `}
     </div>`;
@@ -1268,7 +1477,7 @@ function abaClassificacao() {
 }
 
 const FAQ = [
-  { p: "Os placares são realmente ao vivo?", r: "Sim. O servidor consulta uma API real de futebol automaticamente a cada ~90 segundos, sem precisar de clique." },
+  { p: "Os placares são realmente ao vivo?", r: "Quase. Durante os jogos o servidor consulta uma API real de futebol a cada ~20 segundos, sozinho. Mas o plano grátis dessa API entrega os placares com um atraso de alguns minutos em relação à TV, então gols e notificações chegam com esse atraso." },
   { p: "Como funciona a pontuação?", r: "Placar exato = 8 pontos. Acertar só quem venceu = 3 pontos, mais bônus por acertar os gols do vencedor (+3), do perdedor (+1) e a diferença (+2), que se somam entre si. Empate certo (sem cravar) = 5 pontos (3 por acertar o empate + 2 pela diferença, que num empate é sempre 0)." },
   { p: "Como convido meus amigos pro grupo?", r: "Na tela do bolão, toque no código do grupo (no topo) para copiá-lo e mande junto com a senha." },
   { p: "Posso usar minha conta em mais de um celular?", r: "Sim! É só entrar com o mesmo email e senha em qualquer aparelho — seus grupos aparecem automaticamente." },
@@ -1276,7 +1485,7 @@ const FAQ = [
   { p: "Esqueci a senha da minha conta, e agora?", r: "Use 'esqueci minha senha' na tela de login, com o código de recuperação que apareceu quando você criou a conta. Sem esse código, infelizmente não tem como recuperar — guarde ele em lugar seguro." },
   { p: "Como saio de um grupo?", r: "Em Configurações → Sair deste grupo. Isso apaga seus palpites daquele grupo (os outros participantes continuam normalmente)." },
   { p: "Se eu trocar meu apelido, perco meus pontos?", r: "Não — agora sua identidade é a conta (email), não o apelido. Pode trocar o apelido à vontade em Configurações que seus pontos continuam." },
-  { p: "Como funcionam as notificações dos jogos?", r: "Ative em Configurações → Notificações dos jogos. Você recebe no celular, mesmo com o app fechado, o início do jogo, cada gol e o fim de jogo (com os pontos do seu palpite) — palpitando ou não — e um aviso 1h antes se ainda não palpitou. Cada jogo ocupa uma notificação só, que vai sendo atualizada com o placar mais recente. No iPhone, instale o app antes (Compartilhar → Adicionar à Tela de Início)." },
+  { p: "Como funcionam as notificações dos jogos?", r: "Ative em Configurações → Notificações dos jogos. Você recebe no celular, mesmo com o app fechado, o início do jogo, cada gol e o fim de jogo (com os pontos do seu palpite) — palpitando ou não — e um aviso 1h antes se ainda não palpitou. Só dos times que você segue: na aba Tabela, toque em “seguir” ao lado de cada time (pode seguir vários) ou em “seguir tudo”. Jogo de time que você não segue não notifica. Cada jogo ocupa uma notificação só, que vai sendo atualizada com o placar mais recente. No iPhone, instale o app antes (Compartilhar → Adicionar à Tela de Início)." },
   { p: "Como removo alguém do meu grupo?", r: "Só quem criou o grupo pode. Vá em Configurações → Participantes e toque em Remover ao lado do nome (ou toque no nome da pessoa na Classificação). A pessoa perde os palpites daquele grupo e não consegue voltar com a senha atual — se quiser deixar entrar de novo, troque a senha do grupo." },
   { p: "Posso jogar em mais de um bolão ao mesmo tempo?", r: "Sim — sua conta pode participar de quantos grupos quiser. A tela inicial mostra 'Seus grupos' com todos eles, e dá pra sincronizar o palpite entre grupos da mesma liga em Configurações, pra não precisar apostar duas vezes." },
 ];
@@ -1445,6 +1654,7 @@ function telaBolao() {
             <button class="${state.abaBolao === "jogos" ? "ativo" : ""}" onclick="setAbaBolao('jogos')">🎟️ Jogos</button>
             <button class="${state.abaBolao === "finalizados" ? "ativo" : ""}" onclick="setAbaBolao('finalizados')">✅ Finalizados</button>
             <button class="${state.abaBolao === "classificacao" ? "ativo" : ""}" onclick="setAbaBolao('classificacao')">🏆 Classificação</button>
+            <button class="${state.abaBolao === "tabela" ? "ativo" : ""}" onclick="setAbaBolao('tabela')">📊 Tabela</button>
           </div>
         </div>
       </header>
@@ -1452,6 +1662,7 @@ function telaBolao() {
       <div style="background:var(--paper-soft)">
         ${state.abaBolao === "jogos" ? abaJogos() : ""}
         ${state.abaBolao === "finalizados" ? abaFinalizados() : ""}
+        ${state.abaBolao === "tabela" ? abaTabela() : ""}
         ${state.abaBolao === "config" ? abaConfig() : ""}
       </div>
       ${state.abaBolao === "classificacao" ? abaClassificacao() : ""}
@@ -1492,7 +1703,11 @@ function renderFolhaAposta() {
   if (!g) { overlay.innerHTML = ""; return; }
 
   const jaExistia = !!document.getElementById("sheet-painel");
+  const rolagemAntes = document.getElementById("sheet-scroll");
+  const topoAntes = rolagemAntes ? rolagemAntes.scrollTop : 0; // a folha é redesenhada a cada atualização: mantém onde a pessoa estava lendo
   overlay.innerHTML = montarFolhaAposta(g);
+  const rolagemDepois = document.getElementById("sheet-scroll");
+  if (rolagemDepois && topoAntes) rolagemDepois.scrollTop = topoAntes;
   const painel = document.getElementById("sheet-painel");
   if (painel) {
     if (jaExistia) {
