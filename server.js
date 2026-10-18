@@ -24,7 +24,8 @@ const DB_PATH = path.join(__dirname, "data", "db.json");
 const DB_KEY = "bolao_db";
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
-const POLL_INTERVAL_MS = 50 * 1000; // o mais rápido que dá pra ir com 7 ligas sem estourar os 10 req/min do plano grátis
+const POLL_INTERVAL_MS = 3 * 60 * 1000; // varredura completa das 7 ligas (calendário, rodadas novas). Durante jogos, quem acompanha o placar é a consulta rápida (veja tickAoVivo)
+const AOVIVO_INTERVAL_MS = 20 * 1000; // consulta rápida: roda só quando existe jogo ao vivo / prestes a começar
 
 const LEAGUE_META = {
   epl: { name: "Premier League", flag: "🏴", country: "Inglaterra", code: "PL" },
@@ -78,6 +79,8 @@ async function loadDb() {
   db.pushSubs = db.pushSubs || {}; // email -> [{endpoint, keys}] (um por aparelho)
   db.estadoJogos = db.estadoJogos || {}; // jogoId -> {s, h, a} (pra detectar gol/início/fim)
   db.lembretesEnviados = db.lembretesEnviados || {}; // "email:jogoId" -> timestamp
+  db.eventosEnviados = db.eventosEnviados || {}; // "jogoId:gol:1-0" -> timestamp (trava contra notificação repetida)
+  db.seguindo = db.seguindo || {}; // email -> { [ligaId]: { tudo: bool, times: [teamId] } }
   return db;
 }
 
@@ -147,18 +150,8 @@ function mapStatus(s) {
   return "scheduled";
 }
 
-async function buscarLiga(ligaId) {
-  const meta = LEAGUE_META[ligaId];
-  if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
-  const hoje = new Date();
-  const de = new Date(hoje); de.setDate(de.getDate() - 200); // tentando de novo com mais cuidado — as quebras anteriores podem ter sido falha de build/upload, não da API
-  const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
-  const fmt = (d) => d.toISOString().slice(0, 10);
-  const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
-  const resp = await fetchFootballData(url);
-  if (!resp.ok) throw new Error(`football-data respondeu ${resp.status}`);
-  const data = await resp.json();
-  const jogos = (data.matches || []).map((m) => ({
+function mapearJogo(m) {
+  return {
     id: String(m.id),
     home: m.homeTeam?.name || "?",
     away: m.awayTeam?.name || "?",
@@ -175,7 +168,21 @@ async function buscarLiga(ligaId) {
     acrescimo: typeof m.injuryTime === "number" ? m.injuryTime : null,
     matchday: typeof m.matchday === "number" ? m.matchday : null,
     kickoff: m.utcDate,
-  }));
+  };
+}
+
+async function buscarLiga(ligaId) {
+  const meta = LEAGUE_META[ligaId];
+  if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY não configurada");
+  const hoje = new Date();
+  const de = new Date(hoje); de.setDate(de.getDate() - 200); // tentando de novo com mais cuidado — as quebras anteriores podem ter sido falha de build/upload, não da API
+  const ate = new Date(hoje); ate.setDate(ate.getDate() + 21); // janela larga: garante que a próxima rodada já apareça assim que a atual acabar
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const url = `https://api.football-data.org/v4/competitions/${meta.code}/matches?dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
+  const resp = await fetchFootballData(url);
+  if (!resp.ok) throw new Error(`football-data respondeu ${resp.status}`);
+  const data = await resp.json();
+  const jogos = (data.matches || []).map(mapearJogo);
   jogos.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
   return jogos;
 }
@@ -206,34 +213,166 @@ async function fetchFootballData(url) {
   return fetch(url, { headers: { "X-Auth-Token": API_KEY } });
 }
 
+/* passa os jogos de uma liga pelo "pipeline": histórico dos grupos + notificações push.
+   Carrega o db UMA vez, salva ANTES de enviar os pushes (envio é lento e não pode segurar o db).
+   Roda SEMPRE UM DE CADA VEZ (fila): antes, a varredura completa e a consulta rápida podiam rodar
+   juntas, os dois enxergavam o mesmo gol como "novo" e mandavam a notificação em dobro. */
+let filaProcessamento = Promise.resolve();
+function processarLiga(ligaId) {
+  const p = filaProcessamento.then(() => processarLigaAgora(ligaId));
+  filaProcessamento = p.catch(() => {});
+  return p;
+}
+async function processarLigaAgora(ligaId) {
+  const jogos = scoresCache[ligaId].jogos || []; // sempre a versão mais nova que temos, mesmo se esperou na fila
+  const db = await loadDb();
+  let mudou = atualizarHistoricoDosGrupos(db, ligaId, jogos);
+  let envios = [];
+  try {
+    const r = prepararNotificacoes(db, ligaId, jogos);
+    if (r.mudou) mudou = true;
+    envios = r.envios;
+  } catch (e) { console.error("erro preparando notificações:", e.message); }
+  if (mudou) await saveDb(db);
+  if (envios.length) await enviarPushes(envios);
+}
+
+/* As duas consultas (completa e rápida) às vezes devolvem versões diferentes do mesmo jogo (a API tem cache).
+   Pra o placar não "piscar" 1x0 → 0x0 → 1x0 (o que gerava notificação repetida), se chegar uma versão
+   mais ANTIGA (status que voltou, ou menos gols) de um jogo que acabamos de ver, mantemos a mais nova por 4 min. */
+const RANK_STATUS = { adiado: 0, scheduled: 0, live: 1, final: 2 };
+const aceitoEm = new Map(); // jogoId -> quando aceitamos a última versão
+function escolherVersao(velho, novo) {
+  if (velho) {
+    const recente = Date.now() - (aceitoEm.get(novo.id) || 0) < 4 * 60 * 1000;
+    const maisAntigo =
+      RANK_STATUS[novo.status] < RANK_STATUS[velho.status] ||
+      (novo.status === "live" && velho.status === "live" && novo.hs + novo.as < velho.hs + velho.as);
+    if (maisAntigo && recente) return velho;
+  }
+  aceitoEm.set(novo.id, Date.now());
+  return novo;
+}
+
+/* busca a liga inteira (janela grande de datas) e processa */
+async function atualizarLigaCompleta(ligaId) {
+  const jogos = await buscarLiga(ligaId);
+  const antigos = new Map((scoresCache[ligaId].jogos || []).map((j) => [j.id, j]));
+  let terminou = false;
+  const mesclados = jogos.map((n) => {
+    const o = antigos.get(n.id);
+    const v = escolherVersao(o, n);
+    if (o && o.status !== "final" && v.status === "final") terminou = true;
+    return v;
+  });
+  scoresCache[ligaId] = { atualizadoEm: Date.now(), jogos: mesclados };
+  for (const j of mesclados) {
+    if (j.status === "final") arquivoFinalizados[ligaId][j.id] = j;
+  }
+  if (terminou) agendarAtualizacaoTabela(ligaId);
+  await processarLiga(ligaId);
+}
+
+let pollandoTudo = false;
 async function pollAll() {
-  for (const ligaId of LEAGUE_IDS) {
-    try {
-      const jogos = await buscarLiga(ligaId);
-      scoresCache[ligaId] = { atualizadoEm: Date.now(), jogos };
-      for (const j of jogos) {
-        if (j.status === "final") arquivoFinalizados[ligaId][j.id] = j;
-      }
-      const db = await loadDb();
-      let mudou = atualizarHistoricoDosGrupos(db, ligaId, jogos);
-      let envios = [];
+  if (pollandoTudo) return; // nunca deixa duas varreduras se atropelarem
+  pollandoTudo = true;
+  try {
+    for (const ligaId of LEAGUE_IDS) {
       try {
-        const r = prepararNotificacoes(db, ligaId, jogos);
-        if (r.mudou) mudou = true;
-        envios = r.envios;
-      } catch (e) { console.error("erro preparando notificações:", e.message); }
-      if (mudou) await saveDb(db); // salva ANTES de enviar os pushes (envio é lento e não deve segurar o db)
-      if (envios.length) await enviarPushes(envios);
-    } catch (e) {
-      console.error(`erro ao buscar ${ligaId}:`, e.message);
+        await atualizarLigaCompleta(ligaId);
+      } catch (e) {
+        console.error(`erro ao buscar ${ligaId}:`, e.message);
+      }
+      await delay(1500); // espaça as chamadas pra não estourar o limite da API
     }
-    await delay(1500); // espaça as chamadas pra não estourar o limite da API
+  } finally {
+    pollandoTudo = false;
+  }
+}
+
+/* ---------------- consulta rápida durante os jogos ---------------- */
+
+// jogo "ativo" = ao vivo agora, ou começando em até 5 min, ou que já devia ter começado (até 3h atrás) e ainda não terminou
+function ligasComJogoAtivo() {
+  const agora = Date.now();
+  return LEAGUE_IDS.filter((id) =>
+    (scoresCache[id].jogos || []).some((j) => {
+      if (j.status === "live") return true;
+      const ko = new Date(j.kickoff).getTime();
+      return j.status === "scheduled" && ko - agora < 5 * 60 * 1000 && agora - ko < 3 * 3600 * 1000;
+    })
+  );
+}
+
+// junta os jogos recém-buscados na lista da liga; diz se algum mudou de status ou placar
+function mesclarJogos(ligaId, novos) {
+  const porId = new Map((scoresCache[ligaId].jogos || []).map((j) => [j.id, j]));
+  let mudou = false;
+  let terminou = false;
+  for (const n of novos) {
+    const o = porId.get(n.id);
+    const v = escolherVersao(o, n);
+    if (!o || o.status !== v.status || o.hs !== v.hs || o.as !== v.as) mudou = true;
+    if (o && o.status !== "final" && v.status === "final") terminou = true;
+    porId.set(n.id, v);
+    if (v.status === "final") arquivoFinalizados[ligaId][v.id] = v;
+  }
+  const jogos = [...porId.values()].sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+  scoresCache[ligaId] = { atualizadoEm: Date.now(), jogos };
+  return { mudou, terminou };
+}
+
+/* UMA chamada só traz os jogos de ontem/hoje/amanhã das 7 ligas — bem mais leve que consultar liga por liga */
+async function buscarAoVivo() {
+  if (!API_KEY) return;
+  const codigos = LEAGUE_IDS.map((id) => LEAGUE_META[id].code).join(",");
+  const hoje = new Date();
+  const de = new Date(hoje); de.setDate(de.getDate() - 1);
+  const ate = new Date(hoje); ate.setDate(ate.getDate() + 1);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const url = `https://api.football-data.org/v4/matches?competitions=${codigos}&dateFrom=${fmt(de)}&dateTo=${fmt(ate)}`;
+  const resp = await fetchFootballData(url);
+  if (!resp.ok) throw new Error(`football-data respondeu ${resp.status}`);
+  const data = await resp.json();
+  const porLiga = {};
+  for (const m of data.matches || []) {
+    const ligaId = LEAGUE_IDS.find((id) => LEAGUE_META[id].code === m.competition?.code);
+    if (!ligaId) continue;
+    (porLiga[ligaId] = porLiga[ligaId] || []).push(mapearJogo(m));
+  }
+  for (const [ligaId, novos] of Object.entries(porLiga)) {
+    const { mudou, terminou } = mesclarJogos(ligaId, novos);
+    if (terminou) agendarAtualizacaoTabela(ligaId);
+    if (mudou) await processarLiga(ligaId); // só mexe no banco quando saiu gol / começou / acabou
+  }
+}
+
+let rodandoRapido = false;
+async function tickAoVivo() {
+  if (rodandoRapido) return;
+  const ativas = ligasComJogoAtivo();
+  if (ativas.length === 0) return; // sem jogo rolando: não gasta nenhuma consulta
+  rodandoRapido = true;
+  try {
+    try {
+      await buscarAoVivo();
+    } catch (e) {
+      console.error("consulta rápida falhou, tentando liga por liga:", e.message);
+      for (const id of ativas) {
+        try { await atualizarLigaCompleta(id); } catch (e2) { console.error(`erro ao buscar ${id}:`, e2.message); }
+      }
+    }
+  } finally {
+    rodandoRapido = false;
   }
 }
 
 /* ---------------- tabela do campeonato (pra estimar probabilidade de vitória) ---------------- */
 
 const standingsCache = Object.fromEntries(LEAGUE_IDS.map((id) => [id, {}])); // ligaId -> { [teamId]: {pontos, jogos, saldoGols} }
+// a tabela completa, pra mostrar no app: ligaId -> { atualizadoEm, grupos: [{ nome, linhas: [...] }] }
+const tabelaCompleta = Object.fromEntries(LEAGUE_IDS.map((id) => [id, { atualizadoEm: null, grupos: [] }]));
 
 async function buscarTabela(ligaId) {
   const meta = LEAGUE_META[ligaId];
@@ -242,25 +381,48 @@ async function buscarTabela(ligaId) {
   const resp = await fetchFootballData(url);
   if (!resp.ok) throw new Error(`standings respondeu ${resp.status}`);
   const data = await resp.json();
-  const grupo = (data.standings || []).find((s) => s.type === "TOTAL") || (data.standings || [])[0];
+  const todas = (data.standings || []).filter((s) => s.type === "TOTAL");
+  const lista = todas.length ? todas : (data.standings || []).slice(0, 1);
   const tabela = {};
-  for (const linha of (grupo?.table || [])) {
-    if (linha.team?.id) {
-      tabela[linha.team.id] = { pontos: linha.points, jogos: linha.playedGames, saldoGols: linha.goalDifference };
-    }
-  }
-  return tabela;
+  const grupos = lista.map((g) => ({
+    nome: g.group ? String(g.group).replace(/_/g, " ") : null,
+    linhas: (g.table || []).map((l) => {
+      if (l.team?.id) tabela[l.team.id] = { pontos: l.points, jogos: l.playedGames, saldoGols: l.goalDifference };
+      return {
+        pos: l.position, timeId: l.team?.id || null,
+        nome: l.team?.shortName || l.team?.name || "?", tla: l.team?.tla || "", escudo: l.team?.crest || null,
+        jogos: l.playedGames, v: l.won, e: l.draw, d: l.lost, gp: l.goalsFor, gc: l.goalsAgainst, sg: l.goalDifference, pts: l.points,
+      };
+    }),
+  }));
+  return { tabela, grupos };
+}
+
+async function atualizarTabela(ligaId) {
+  const { tabela, grupos } = await buscarTabela(ligaId);
+  standingsCache[ligaId] = tabela;
+  tabelaCompleta[ligaId] = { atualizadoEm: Date.now(), grupos };
 }
 
 async function pollStandings() {
   for (const ligaId of LEAGUE_IDS) {
     try {
-      standingsCache[ligaId] = await buscarTabela(ligaId);
+      await atualizarTabela(ligaId);
     } catch (e) {
       console.error(`erro ao buscar tabela ${ligaId}:`, e.message);
     }
     await delay(1500);
   }
+}
+
+/* quando um jogo termina, atualiza a tabela daquela liga logo (e de novo depois, porque a API demora um pouco
+   pra refletir o resultado na classificação) */
+const timersTabela = new Map();
+function agendarAtualizacaoTabela(ligaId) {
+  const rodar = () => atualizarTabela(ligaId).catch((e) => console.error(`erro ao atualizar tabela ${ligaId}:`, e.message));
+  for (const t of timersTabela.get(ligaId) || []) clearTimeout(t);
+  rodar();
+  timersTabela.set(ligaId, [setTimeout(rodar, 2 * 60 * 1000), setTimeout(rodar, 6 * 60 * 1000)]);
 }
 
 /* estimativa simples de probabilidade a partir da tabela (pontos por jogo + saldo de gols
@@ -360,6 +522,15 @@ const JANELA_ANTES_MS = 36 * 3600 * 1000; // só acompanha jogos de 12h atrás a
 const JANELA_DEPOIS_MS = 12 * 3600 * 1000;
 const IDADE_MAX_EVENTO_MS = 4 * 3600 * 1000; // se o servidor "dormiu" e acordou muito depois, não manda notificação velha
 
+/* a pessoa recebe notificação de um jogo só se SEGUE um dos times dele (ou marcou "seguir tudo" naquela liga) */
+function segueJogo(db, email, ligaId, j) {
+  const s = db.seguindo[email] && db.seguindo[email][ligaId];
+  if (!s) return false;
+  if (s.tudo) return true;
+  const times = s.times || [];
+  return (j.haId != null && times.includes(j.haId)) || (j.aaId != null && times.includes(j.aaId));
+}
+
 function linhasDePalpite(db, email, ligaId, j, comoEstaValendo) {
   const meusGrupos = Object.values(db.groups).filter((g) => g.liga === ligaId && g.membros[email]);
   const linhas = [];
@@ -377,7 +548,7 @@ function linhasDePalpite(db, email, ligaId, j, comoEstaValendo) {
 }
 
 /* Só CALCULA o que precisa ser enviado e atualiza o estado em memória do db — quem salva
-   e quem envia é o pollAll (salva primeiro, depois manda os pushes). */
+   e quem envia é o processarLiga (salva primeiro, depois manda os pushes). */
 function prepararNotificacoes(db, ligaId, jogos) {
   const resultado = { mudou: false, envios: [] };
   if (!webpush || !VAPID) return resultado;
@@ -406,6 +577,8 @@ function prepararNotificacoes(db, ligaId, jogos) {
       // primeira vez que vemos esse jogo: só registra, não notifica (evita enxurrada no primeiro deploy)
       db.estadoJogos[j.id] = atual;
       resultado.mudou = true;
+    } else if (RANK_STATUS[atual.s] < RANK_STATUS[prev.s]) {
+      // dado velho chegando atrasado da API (o jogo "voltou" de status): ignora, não mexe no estado nem avisa
     } else if (prev.s !== atual.s || prev.h !== atual.h || prev.a !== atual.a) {
       db.estadoJogos[j.id] = atual;
       resultado.mudou = true;
@@ -413,21 +586,30 @@ function prepararNotificacoes(db, ligaId, jogos) {
       let tipo = null;
       if (atual.s === "final" && prev.s !== "final") tipo = "fim";
       else if (atual.s === "live" && prev.s === "scheduled") tipo = atual.h + atual.a > 0 ? "gol" : "inicio";
-      else if (atual.s === "live" && prev.s === "live" && (atual.h !== prev.h || atual.a !== prev.a)) tipo = "gol";
+      else if (atual.s === "live" && prev.s === "live" && (atual.h > prev.h || atual.a > prev.a)) tipo = "gol";
+      // placar que DIMINUI (VAR ou dado velho da API): só atualiza o estado, sem avisar
 
-      if (tipo && inscritos.size && agora - ko < IDADE_MAX_EVENTO_MS) {
+      // trava final contra notificação repetida: cada evento (ex.: "gol, 1x0") só é enviado uma vez, aconteça o que acontecer
+      let jaEnviado = false;
+      if (tipo) {
+        const chaveEvento = tipo === "gol" ? `${j.id}:gol:${atual.h}-${atual.a}` : `${j.id}:${tipo}`;
+        jaEnviado = !!db.eventosEnviados[chaveEvento];
+        if (!jaEnviado) db.eventosEnviados[chaveEvento] = agora;
+      }
+
+      if (tipo && !jaEnviado && inscritos.size && agora - ko < IDADE_MAX_EVENTO_MS) {
         const placar = `${j.ha} ${j.hs} x ${j.as} ${j.aa}`;
         const minuto = j.minuto != null ? ` · ${j.minuto}'` : "";
-        const corrigido = atual.h < prev.h || atual.a < prev.a;
         const marcou = atual.h > prev.h ? j.ha : atual.a > prev.a ? j.aa : null;
         let titulo, fixa, ttl, valendo;
         if (tipo === "inicio") { titulo = `🟢 Começou! ${j.ha} x ${j.aa}`; fixa = true; ttl = 600; valendo = "live"; }
         else if (tipo === "gol") {
-          titulo = corrigido ? `🔄 Placar corrigido: ${placar}${minuto}` : `⚽ GOL${marcou ? ` do ${marcou}` : ""}! ${placar}${minuto}`;
+          titulo = `⚽ GOL${marcou ? ` do ${marcou}` : ""}! ${placar}${minuto}`;
           fixa = true; ttl = 600; valendo = "live";
         } else { titulo = `🏁 Fim de jogo: ${placar}`; fixa = false; ttl = 3600; valendo = "final"; }
 
         for (const email of inscritos) {
+          if (!segueJogo(db, email, ligaId, j)) continue; // só recebe quem segue o time da casa ou o visitante (ou "seguir tudo")
           const corpo = [`${j.home} x ${j.away}`, ...linhasDePalpite(db, email, ligaId, j, valendo)].join("\n");
           empurrar(email, { title: titulo, body: corpo, tag: `jogo-${j.id}`, renotify: true, fixa, url: "/" }, `j${j.id}`, ttl);
         }
@@ -440,6 +622,7 @@ function prepararNotificacoes(db, ligaId, jogos) {
       for (const g of grupos) {
         for (const email of Object.keys(g.membros)) {
           if (!(db.pushSubs[email] || []).length) continue;
+          if (!segueJogo(db, email, ligaId, j)) continue;
           if (g.palpites[email] && g.palpites[email][j.id]) continue;
           const chave = `${email}:${j.id}`;
           if (db.lembretesEnviados[chave]) continue;
@@ -455,8 +638,10 @@ function prepararNotificacoes(db, ligaId, jogos) {
     }
   }
 
-  for (const [chave, quando] of Object.entries(db.lembretesEnviados)) {
-    if (agora - quando > 2 * 24 * 3600 * 1000) { delete db.lembretesEnviados[chave]; resultado.mudou = true; }
+  for (const mapa of [db.lembretesEnviados, db.eventosEnviados]) {
+    for (const [chave, quando] of Object.entries(mapa)) {
+      if (agora - quando > 2 * 24 * 3600 * 1000) { delete mapa[chave]; resultado.mudou = true; }
+    }
   }
   return resultado;
 }
@@ -609,6 +794,100 @@ app.post("/api/push/cancelar", autenticar, async (req, res) => {
     await saveDb(req.db);
   }
   res.json({ ok: true });
+});
+
+/* ---------------- tabela do campeonato, "seguir" times e escalação ---------------- */
+
+app.get("/api/ligas/:ligaId/tabela", autenticar, (req, res) => {
+  const t = tabelaCompleta[req.params.ligaId];
+  if (!t) return res.status(404).json({ erro: "liga inválida" });
+  res.json(t);
+});
+
+function estadoSeguindo(db, email, ligaId) {
+  const s = db.seguindo[email] && db.seguindo[email][ligaId];
+  return { tudo: !!(s && s.tudo), times: s && Array.isArray(s.times) ? s.times : [] };
+}
+function idsDeTodosOsTimes(ligaId) {
+  const ids = new Set();
+  for (const g of tabelaCompleta[ligaId].grupos) for (const l of g.linhas) if (l.timeId) ids.add(l.timeId);
+  for (const j of scoresCache[ligaId].jogos || []) { if (j.haId) ids.add(j.haId); if (j.aaId) ids.add(j.aaId); }
+  return [...ids];
+}
+function gravarSeguindo(db, email, ligaId, estado) {
+  db.seguindo[email] = db.seguindo[email] || {};
+  db.seguindo[email][ligaId] = { tudo: estado.tudo, times: estado.times };
+}
+
+app.get("/api/seguindo/:ligaId", autenticar, (req, res) => {
+  if (!LEAGUE_META[req.params.ligaId]) return res.status(404).json({ erro: "liga inválida" });
+  res.json(estadoSeguindo(req.db, req.userEmail, req.params.ligaId));
+});
+
+app.post("/api/seguindo/:ligaId/time/:teamId", autenticar, async (req, res) => {
+  const { ligaId } = req.params;
+  const teamId = Number(req.params.teamId);
+  if (!LEAGUE_META[ligaId] || !Number.isInteger(teamId)) return res.status(400).json({ erro: "dados inválidos" });
+  const seguir = !!(req.body && req.body.seguir);
+  let { tudo, times } = estadoSeguindo(req.db, req.userEmail, ligaId);
+  if (seguir) {
+    if (!tudo && !times.includes(teamId)) times = [...times, teamId];
+  } else if (tudo) { // estava em "seguir tudo": vira "todos, menos esse"
+    times = idsDeTodosOsTimes(ligaId).filter((id) => id !== teamId);
+    tudo = false;
+  } else {
+    times = times.filter((id) => id !== teamId);
+  }
+  const estado = { tudo, times };
+  gravarSeguindo(req.db, req.userEmail, ligaId, estado);
+  await saveDb(req.db);
+  res.json(estado);
+});
+
+app.post("/api/seguindo/:ligaId/tudo", autenticar, async (req, res) => {
+  const { ligaId } = req.params;
+  if (!LEAGUE_META[ligaId]) return res.status(400).json({ erro: "liga inválida" });
+  const estado = { tudo: !!(req.body && req.body.seguir), times: [] };
+  gravarSeguindo(req.db, req.userEmail, ligaId, estado);
+  await saveDb(req.db);
+  res.json(estado);
+});
+
+/* Escalação: vem da football-data.org, mas o plano GRÁTIS dela não inclui escalações (só os planos pagos).
+   Se a API não mandar, devolvemos disponivel:false e o app mostra um aviso; se o plano mudar, passa a funcionar sozinho. */
+const escalacaoCache = new Map(); // jogoId -> { em, dados }
+function mapearTimeEscalacao(t) {
+  const jog = (p) => ({ nome: p.name || "?", camisa: p.shirtNumber ?? null, posicao: p.position || null });
+  return {
+    formacao: t?.formation || null,
+    tecnico: t?.coach?.name || null,
+    titulares: (t?.lineup || []).map(jog),
+    reservas: (t?.bench || []).map(jog),
+  };
+}
+app.get("/api/jogos/:jogoId/escalacao", autenticar, async (req, res) => {
+  const { jogoId } = req.params;
+  if (!/^\d+$/.test(jogoId)) return res.status(400).json({ erro: "jogo inválido" });
+  const existe = LEAGUE_IDS.some((id) => (scoresCache[id].jogos || []).some((j) => j.id === jogoId));
+  if (!existe) return res.status(404).json({ erro: "jogo não encontrado" });
+  const guardado = escalacaoCache.get(jogoId);
+  if (guardado && Date.now() - guardado.em < 90 * 1000) return res.json(guardado.dados);
+  let dados = { disponivel: false, casa: null, fora: null };
+  try {
+    if (!API_KEY) throw new Error("sem chave da API");
+    await respeitarLimiteApi();
+    const resp = await fetch(`https://api.football-data.org/v4/matches/${jogoId}`, {
+      headers: { "X-Auth-Token": API_KEY, "X-Unfold-Lineups": "true" },
+    });
+    if (resp.ok) {
+      const m = await resp.json();
+      const casa = mapearTimeEscalacao(m.homeTeam);
+      const fora = mapearTimeEscalacao(m.awayTeam);
+      dados = { disponivel: casa.titulares.length + fora.titulares.length > 0, casa, fora };
+    }
+  } catch (e) { console.error("escalação:", e.message); }
+  escalacaoCache.set(jogoId, { em: Date.now(), dados });
+  res.json(dados);
 });
 
 /* ---------------- rotas de placares/ligas ---------------- */
@@ -891,6 +1170,7 @@ app.listen(PORT, () => {
   iniciarPush().catch((e) => console.error("push:", e.message)).finally(() => {
     pollAll();
     setInterval(pollAll, POLL_INTERVAL_MS);
+    setInterval(tickAoVivo, AOVIVO_INTERVAL_MS);
   });
   pollStandings();
   setInterval(pollStandings, 10 * 60 * 1000); // tabela muda pouco, atualiza a cada 10 min
