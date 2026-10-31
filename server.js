@@ -15,6 +15,19 @@ let webpush = null;
 try { webpush = require("web-push"); } catch { console.warn("⚠️  pacote web-push não instalado — notificações desligadas. Rode npm install."); }
 
 const app = express();
+
+// Rede de segurança: se uma rota falhar (ex.: banco indisponível), responde 503 em vez de travar o pedido ou derrubar o servidor
+for (const metodo of ["get", "post", "put", "delete"]) {
+  const original = app[metodo].bind(app);
+  app[metodo] = (rota, ...handlers) => original(rota, ...handlers.map((h) => (req, res, next) => {
+    return Promise.resolve().then(() => h(req, res, next)).catch((e) => {
+      console.error(`erro em ${req.method} ${req.path}:`, e && e.message);
+      if (!res.headersSent) res.status(503).json({ erro: "o servidor está com instabilidade, tenta de novo em instantes" });
+    });
+  }));
+}
+process.on("unhandledRejection", (e) => console.error("promessa rejeitada:", e && e.message));
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -56,23 +69,7 @@ function dbVazio() {
   return { users: {}, sessions: {}, groups: {} };
 }
 
-async function loadDb() {
-  let db;
-  if (UPSTASH_URL && UPSTASH_TOKEN) {
-    try {
-      const data = await upstashCommand(["GET", DB_KEY]);
-      db = data.result ? JSON.parse(data.result) : dbVazio();
-    } catch (e) {
-      console.error("erro ao ler do Upstash:", e.message);
-      db = dbVazio();
-    }
-  } else {
-    try {
-      db = fs.existsSync(DB_PATH) ? JSON.parse(fs.readFileSync(DB_PATH, "utf8")) : dbVazio();
-    } catch {
-      db = dbVazio();
-    }
-  }
+function normalizarDb(db) {
   db.users = db.users || {};
   db.sessions = db.sessions || {};
   db.groups = db.groups || {};
@@ -81,24 +78,80 @@ async function loadDb() {
   db.lembretesEnviados = db.lembretesEnviados || {}; // "email:jogoId" -> timestamp
   db.eventosEnviados = db.eventosEnviados || {}; // "jogoId:gol:1-0" -> timestamp (trava contra notificação repetida)
   db.seguindo = db.seguindo || {}; // email -> { [ligaId]: { tudo: bool, times: [teamId] } }
+  db.importados = db.importados || {}; // "grupo|email|jogoId" -> true (palpites já lançados pelo importar-palpites.json)
   return db;
 }
 
-async function saveDb(db) {
+/* O banco fica em MEMÓRIA no servidor: lê do Upstash UMA vez (quando o servidor liga) e depois só GRAVA quando algo muda.
+   Antes, cada pedido de cada pessoa baixava o banco inteiro do Upstash e o plano grátis (10 GB de banda por mês)
+   acabava — aí o Upstash SUSPENDE o banco, o app enxerga um banco "vazio" e ninguém consegue entrar.
+   REGRA DE OURO: se a leitura falhar, NUNCA se inventa um banco vazio (isso podia ser gravado por cima dos dados de verdade). */
+let dbMemoria = null; // a cópia "oficial"
+let dbCarregando = null;
+let ultimaFalhaLeitura = { em: 0, erro: null };
+let dbSujo = false;
+let timerGravacao = null;
+let gravando = Promise.resolve();
+
+async function lerDoArmazenamento() {
   if (UPSTASH_URL && UPSTASH_TOKEN) {
-    try {
-      await upstashCommand(["SET", DB_KEY, JSON.stringify(db)]);
-    } catch (e) {
-      console.error("erro ao salvar no Upstash:", e.message);
+    const data = await upstashCommand(["GET", DB_KEY]);
+    if (data.error) throw new Error(`Upstash: ${data.error}`);
+    return data.result ? JSON.parse(data.result) : dbVazio(); // chave ainda não existe = primeira vez
+  }
+  if (!fs.existsSync(DB_PATH)) return dbVazio();
+  return JSON.parse(fs.readFileSync(DB_PATH, "utf8")); // se estiver corrompido, joga erro (não troca por vazio)
+}
+
+/* devolve uma CÓPIA do banco (cada pedido trabalha na sua cópia, como sempre foi); saveDb(cópia) torna ela a oficial */
+async function loadDb() {
+  if (!dbMemoria) {
+    if (Date.now() - ultimaFalhaLeitura.em < 5000 && ultimaFalhaLeitura.erro) throw ultimaFalhaLeitura.erro; // não martela o Upstash
+    if (!dbCarregando) {
+      dbCarregando = lerDoArmazenamento()
+        .then((d) => { dbMemoria = normalizarDb(d); console.log("💾 banco carregado:", Object.keys(dbMemoria.users).length, "contas,", Object.keys(dbMemoria.groups).length, "grupos"); })
+        .catch((e) => { ultimaFalhaLeitura = { em: Date.now(), erro: e }; console.error("ERRO ao ler o banco (nada foi sobrescrito):", e.message); throw e; })
+        .finally(() => { dbCarregando = null; });
     }
-    return;
+    await dbCarregando;
   }
-  try {
-    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-  } catch (e) {
-    console.error("falha ao salvar db:", e.message);
-  }
+  return structuredClone(dbMemoria);
+}
+
+async function saveDb(db) {
+  if (!dbMemoria) return; // nunca grava antes de ter lido com sucesso
+  dbMemoria = db;
+  dbSujo = true;
+  if (!timerGravacao) timerGravacao = setTimeout(gravarAgora, 3000); // junta várias mudanças seguidas numa gravação só
+}
+
+async function gravarAgora() {
+  clearTimeout(timerGravacao);
+  timerGravacao = null;
+  if (!dbMemoria || !dbSujo) return gravando;
+  dbSujo = false;
+  const texto = JSON.stringify(dbMemoria);
+  gravando = gravando.then(async () => {
+    try {
+      if (UPSTASH_URL && UPSTASH_TOKEN) {
+        const r = await upstashCommand(["SET", DB_KEY, texto]);
+        if (r && r.error) throw new Error(r.error);
+      } else {
+        fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+        fs.writeFileSync(DB_PATH, texto);
+      }
+    } catch (e) {
+      console.error("erro ao gravar o banco (tento de novo em 15 s):", e.message);
+      dbSujo = true;
+      if (!timerGravacao) timerGravacao = setTimeout(gravarAgora, 15000);
+    }
+  });
+  return gravando;
+}
+
+// quando o Render desliga o servidor (deploy/reinício), grava o que estiver pendente antes de sair
+for (const sinal of ["SIGTERM", "SIGINT"]) {
+  process.on(sinal, async () => { try { await gravarAgora(); } finally { process.exit(0); } });
 }
 
 /* ---------------- helpers ---------------- */
@@ -286,9 +339,83 @@ async function pollAll() {
       }
       await delay(1500); // espaça as chamadas pra não estourar o limite da API
     }
+    await aplicarImportacao().catch((e) => console.error("importação de palpites:", e.message));
   } finally {
     pollandoTudo = false;
   }
+}
+
+/* ---------------- palpites combinados fora do app (importar-palpites.json) ----------------
+   Serve pra quando o app ficou fora do ar e o criador juntou os palpites pelo WhatsApp: o arquivo
+   importar-palpites.json (na raiz do projeto) lista, por grupo e por pessoa, os jogos e placares.
+   O servidor acha cada jogo pelos NOMES dos times + data, lança o palpite no nome da pessoa (que precisa
+   ser membro do grupo) e a classificação calcula os pontos sozinha pelo resultado real.
+   - NÃO sobrescreve palpite que a pessoa já tenha feito no app;
+   - cada palpite é lançado uma vez só (fica marcado em db.importados);
+   - se o banco estiver indisponível, espera e tenta de novo na próxima varredura. */
+const IMPORT_PATH = path.join(__dirname, "importar-palpites.json");
+const APELIDOS_TIMES = { wolves: "wolverhampton wanderers", "man city": "manchester city", "man united": "manchester united", "man utd": "manchester united", spurs: "tottenham hotspur", "nottm forest": "nottingham forest", forest: "nottingham forest" };
+
+function normTexto(t) {
+  return String(t || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/&/g, " ").replace(/[^a-z0-9 ]/g, " ").replace(/\b(fc|afc|cf|sc|ac)\b/g, " ").replace(/\s+/g, " ").trim();
+}
+function mesmoTime(nomeArquivo, nomeApi) {
+  let n = normTexto(nomeArquivo);
+  n = APELIDOS_TIMES[n] || n;
+  const a = n.split(" ").filter(Boolean);
+  const b = normTexto(nomeApi).split(" ").filter(Boolean);
+  if (!a.length || !b.length) return false;
+  const [curto, longo] = a.length <= b.length ? [a, b] : [b, a];
+  return curto.every((t) => longo.includes(t)); // "Tottenham" bate com "Tottenham Hotspur"; "Manchester City" NÃO bate com "Manchester United"
+}
+
+let ultimoRelatorioImportacao = "";
+async function aplicarImportacao() {
+  if (!fs.existsSync(IMPORT_PATH)) return;
+  let arquivo;
+  try { arquivo = JSON.parse(fs.readFileSync(IMPORT_PATH, "utf8")); }
+  catch (e) { console.error("importação: importar-palpites.json ilegível:", e.message); return; }
+  let db;
+  try { db = await loadDb(); } catch { return; } // banco indisponível: tenta de novo na próxima varredura
+  db.importados = db.importados || {};
+  let lancados = 0, jaTinha = 0;
+  const pendencias = [];
+  const gruposTocados = new Set();
+  for (const bloco of arquivo.palpites || []) {
+    const g = db.groups[bloco.grupo];
+    if (!g) { pendencias.push(`grupo ${bloco.grupo} não existe`); continue; }
+    const email = Object.keys(g.membros).find((em) => db.users[em] && normTexto(db.users[em].nome) === normTexto(bloco.pessoa));
+    if (!email) { pendencias.push(`"${bloco.pessoa}" não é membro do grupo ${bloco.grupo} (nome precisa ser igual ao do app)`); continue; }
+    const jogosDaLiga = (scoresCache[g.liga] && scoresCache[g.liga].jogos) || [];
+    if (jogosDaLiga.length === 0) { pendencias.push(`jogos de ${g.liga} ainda não carregaram`); continue; }
+    for (const it of bloco.jogos || []) {
+      const rotulo = `${bloco.pessoa}: ${it.casa} x ${it.fora} (${it.data})`;
+      const m = /^(\d+)\s*[xX×-]\s*(\d+)$/.exec(String(it.palpite || "").trim());
+      if (!m) { pendencias.push(`${rotulo}: palpite "${it.palpite}" inválido`); continue; }
+      const alvo = new Date(`${it.data}T12:00:00Z`).getTime();
+      const achados = jogosDaLiga
+        .filter((j) => mesmoTime(it.casa, j.home) && mesmoTime(it.fora, j.away) && Math.abs(new Date(j.kickoff).getTime() - alvo) < 36 * 3600 * 1000)
+        .sort((x, y) => Math.abs(new Date(x.kickoff) - alvo) - Math.abs(new Date(y.kickoff) - alvo));
+      if (achados.length === 0) { pendencias.push(`${rotulo}: jogo não encontrado`); continue; }
+      const jogo = achados[0];
+      const chave = `${bloco.grupo}|${email}|${jogo.id}`;
+      if (db.importados[chave]) continue;
+      g.palpites[email] = g.palpites[email] || {};
+      if (g.palpites[email][jogo.id]) { db.importados[chave] = true; jaTinha++; continue; } // nunca sobrescreve o que a pessoa fez no app
+      g.palpites[email][jogo.id] = { h: Number(m[1]), a: Number(m[2]) };
+      db.importados[chave] = true;
+      lancados++;
+      gruposTocados.add(bloco.grupo);
+    }
+  }
+  if (lancados > 0) {
+    for (const code of gruposTocados) db.groups[code].ultimoJogosEncerrados = null; // refaz o histórico da classificação
+    await saveDb(db);
+  }
+  const relatorio = `📥 importação de palpites: ${lancados} lançados agora, ${jaTinha} já existiam no app, ${pendencias.length} pendentes${pendencias.length ? " → " + pendencias.join(" | ") : ""}`;
+  if (lancados > 0 || jaTinha > 0 || relatorio !== ultimoRelatorioImportacao) console.log(relatorio);
+  ultimoRelatorioImportacao = relatorio;
 }
 
 /* ---------------- consulta rápida durante os jogos ---------------- */
@@ -496,7 +623,8 @@ async function iniciarPush() {
           await upstashCommand(["SET", VAPID_KEY, JSON.stringify(chaves)]);
         }
       } catch (e) {
-        console.error("push: não consegui ler/gravar as chaves no Upstash:", e.message);
+        console.error("push: não consegui ler/gravar as chaves no Upstash (tento de novo em 1 min):", e.message);
+        setTimeout(() => iniciarPush().catch(() => {}), 60 * 1000); // ex.: banco suspenso — quando voltar, as notificações ligam sozinhas
         return;
       }
     } else {
@@ -616,7 +744,7 @@ function prepararNotificacoes(db, ligaId, jogos) {
       }
     }
 
-    // lembrete 1h antes — só pra quem ainda NÃO palpitou (as notificações acima chegam pra todo mundo, palpitou ou não)
+    // lembrete 1h antes — só pra quem ainda NÃO palpitou
     const faltam = ko - agora;
     if (j.status === "scheduled" && faltam > 0 && faltam <= 3600 * 1000) {
       for (const g of grupos) {
