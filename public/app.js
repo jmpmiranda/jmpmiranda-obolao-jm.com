@@ -578,6 +578,42 @@ window.removerParticipante = async function (i) {
   }
 };
 
+window.gerarSenhaTemporaria = async function (i) {
+  const l = state.classificacao[i];
+  if (!l || !state.grupo || !state.grupo.souCriador || l.slug === state.meuId) return;
+  if (!confirm(`Gerar uma senha temporária para ${l.jogador}?\n\nA senha atual dela deixa de funcionar e ela será desconectada. Você passa a senha temporária pra ela, que entra com o email de sempre e troca em Configurações → Minha senha.`)) return;
+  try {
+    const r = await api(`/api/grupos/${state.grupo.code}/membros/${l.slug}/nova-senha`, { method: "POST" });
+    prompt(`Senha temporária de ${r.nome} (copie e mande pra ela — só aparece agora):`, r.senha);
+  } catch (e) {
+    alert("Não consegui gerar a senha: " + e.message);
+  }
+};
+
+window.trocarMinhaSenha = async function () {
+  const senhaAtual = prompt("Sua senha atual (ou a temporária que você recebeu):");
+  if (!senhaAtual) return;
+  const novaSenha = prompt("Escolha a nova senha (mínimo 6 caracteres):");
+  if (!novaSenha) return;
+  try {
+    await api("/api/conta/senha", { method: "POST", body: { senhaAtual, novaSenha } });
+    alert("Senha trocada! Use a nova da próxima vez que entrar.");
+  } catch (e) {
+    alert("Não consegui trocar a senha: " + e.message);
+  }
+};
+
+window.gerarNovoCodigoRecuperacao = async function () {
+  const senha = prompt("Digite sua senha para gerar um novo código de recuperação (o antigo deixa de valer):");
+  if (!senha) return;
+  try {
+    const r = await api("/api/conta/novo-codigo", { method: "POST", body: { senha } });
+    prompt("Seu NOVO código de recuperação — anote em um lugar seguro, ele só aparece agora:", r.codigoRecuperacao);
+  } catch (e) {
+    alert("Não consegui gerar o código: " + e.message);
+  }
+};
+
 window.copiarCodigo = async function () {
   try { await navigator.clipboard.writeText(state.grupo.code); } catch {}
   state.copiado = true; render();
@@ -1486,6 +1522,7 @@ const FAQ = [
   { p: "Como saio de um grupo?", r: "Em Configurações → Sair deste grupo. Isso apaga seus palpites daquele grupo (os outros participantes continuam normalmente)." },
   { p: "Se eu trocar meu apelido, perco meus pontos?", r: "Não — agora sua identidade é a conta (email), não o apelido. Pode trocar o apelido à vontade em Configurações que seus pontos continuam." },
   { p: "Como funcionam as notificações dos jogos?", r: "Ative em Configurações → Notificações dos jogos. Você recebe no celular, mesmo com o app fechado, o início do jogo, cada gol e o fim de jogo (com os pontos do seu palpite) — palpitando ou não — e um aviso 1h antes se ainda não palpitou. Só dos times que você segue: na aba Tabela, toque em “seguir” ao lado de cada time (pode seguir vários) ou em “seguir tudo”. Jogo de time que você não segue não notifica. Cada jogo ocupa uma notificação só, que vai sendo atualizada com o placar mais recente. No iPhone, instale o app antes (Compartilhar → Adicionar à Tela de Início)." },
+  { p: "Esqueci a senha e não tenho o código de recuperação. E agora?", r: "Peça pra quem criou o seu grupo: em Configurações → Participantes, ele toca em “🔑 Senha” ao lado do seu nome e te passa uma senha temporária. Entre com o seu email e essa senha, depois troque em Configurações → Minha senha e gere um novo código de recuperação (e anote!)." },
   { p: "Como removo alguém do meu grupo?", r: "Só quem criou o grupo pode. Vá em Configurações → Participantes e toque em Remover ao lado do nome (ou toque no nome da pessoa na Classificação). A pessoa perde os palpites daquele grupo e não consegue voltar com a senha atual — se quiser deixar entrar de novo, troque a senha do grupo." },
   { p: "Posso jogar em mais de um bolão ao mesmo tempo?", r: "Sim — sua conta pode participar de quantos grupos quiser. A tela inicial mostra 'Seus grupos' com todos eles, e dá pra sincronizar o palpite entre grupos da mesma liga em Configurações, pra não precisar apostar duas vezes." },
 ];
@@ -1547,16 +1584,23 @@ function abaConfig() {
             </label>`).join("")}
         `) : ""}
         ${state.grupo.souCriador ? itemMenu("participantes", "👥", "Participantes", `${state.classificacao.length}`, `
-          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Só você, que criou o grupo, vê esses botões. Quem for removido perde os palpites daqui e não consegue voltar com a senha atual.</p>
+          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Só você, que criou o grupo, vê esses botões. “🔑 Senha” gera uma senha temporária pra quem esqueceu a senha e perdeu o código de recuperação. Quem for removido perde os palpites daqui e não consegue voltar com a senha atual.</p>
           ${state.classificacao.map((l, i) => `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 2px;border-bottom:1px solid rgba(28,27,20,0.08)">
               <div style="display:flex;align-items:center;gap:10px;min-width:0">
                 ${avatarHtml(l.jogador, l.foto, 28)}
                 <span class="f-mono" style="font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.jogador}${l.slug === state.meuId ? " (você)" : ""}</span>
               </div>
-              ${l.slug === state.meuId ? "" : `<button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--live);flex-shrink:0" onclick="removerParticipante(${i})">✕ Remover</button>`}
+              ${l.slug === state.meuId ? "" : `<div style="display:flex;gap:6px;flex-shrink:0"><button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--pitch)" onclick="gerarSenhaTemporaria(${i})">🔑 Senha</button><button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:11px;background:var(--live)" onclick="removerParticipante(${i})">✕ Remover</button></div>`}
             </div>`).join("")}
         `) : ""}
+        ${itemMenu("minhasenha", "🔑", "Minha senha e código de recuperação", null, `
+          <p class="f-mono" style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.5">Troque a sua senha quando quiser. O código de recuperação serve pra entrar de novo se você esquecer a senha — gere um novo e anote em um lugar seguro.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="trocarMinhaSenha()">Trocar minha senha</button>
+            <button class="chip btn-dark f-display" style="text-transform:uppercase;font-size:12px;background:var(--pitch)" onclick="gerarNovoCodigoRecuperacao()">Gerar novo código</button>
+          </div>
+        `)}
         ${itemMenu("duvidas", "❓", "Dúvidas frequentes", null, `
           ${FAQ.map((item) => `
             <div style="margin-bottom:10px">
