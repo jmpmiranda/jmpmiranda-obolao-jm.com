@@ -830,6 +830,31 @@ app.post("/api/conta/recuperar", async (req, res) => {
   res.json({ ok: true });
 });
 
+/* trocar a própria senha (logado): pede a senha atual */
+app.post("/api/conta/senha", autenticar, async (req, res) => {
+  const { senhaAtual, novaSenha } = req.body || {};
+  const u = req.db.users[req.userEmail];
+  if (!u || u.senhaHash !== hash(senhaAtual || "")) return res.status(401).json({ erro: "a senha atual está incorreta" });
+  if (!novaSenha || novaSenha.length < 6) return res.status(400).json({ erro: "a nova senha precisa ter pelo menos 6 caracteres" });
+  u.senhaHash = hash(novaSenha);
+  for (const [tok, sess] of Object.entries(req.db.sessions)) { // derruba as outras sessões, mantém esta
+    if (sess.email === req.userEmail && tok !== req.token) delete req.db.sessions[tok];
+  }
+  await saveDb(req.db);
+  res.json({ ok: true });
+});
+
+/* gera um NOVO código de recuperação (logado, pedindo a senha): pra quem perdeu o código ou nunca anotou */
+app.post("/api/conta/novo-codigo", autenticar, async (req, res) => {
+  const { senha } = req.body || {};
+  const u = req.db.users[req.userEmail];
+  if (!u || u.senhaHash !== hash(senha || "")) return res.status(401).json({ erro: "a senha está incorreta" });
+  const codigoRecuperacao = gerarCodigo() + gerarCodigo();
+  u.codigoRecuperacaoHash = hash(codigoRecuperacao);
+  await saveDb(req.db);
+  res.json({ codigoRecuperacao }); // só aparece agora, uma vez
+});
+
 app.post("/api/conta/entrar", async (req, res) => {
   const { email, senha } = req.body || {};
   const emailKey = String(email || "").trim().toLowerCase();
@@ -1131,6 +1156,27 @@ app.post("/api/grupos/:code/trocar-senha", autenticar, async (req, res) => {
   g.removidos = {}; // a senha nova é a nova "porta de entrada": quem foi removido antes pode voltar se receber a senha nova
   await saveDb(db);
   res.json({ ok: true });
+});
+
+/* Esqueci a senha e não tenho o código: o CRIADOR do grupo gera uma senha temporária pra um participante.
+   - só vale pra membros do grupo de quem pede, e nunca pra si mesmo;
+   - derruba as sessões da pessoa; ela entra com o email + a senha temporária e troca em Configurações → Minha senha;
+   - NÃO mexe no código de recuperação (assim o criador não fica com acesso permanente à conta). */
+app.post("/api/grupos/:code/membros/:id/nova-senha", autenticar, async (req, res) => {
+  const db = req.db;
+  const g = db.groups[req.params.code];
+  if (!g) return res.status(404).json({ erro: "grupo não encontrado" });
+  if (g.criadoPorEmail !== req.userEmail) return res.status(403).json({ erro: "só quem criou o grupo pode gerar senha temporária" });
+  const alvo = Object.keys(g.membros).find((email) => idAnonimo(email) === req.params.id);
+  if (!alvo || !db.users[alvo]) return res.status(404).json({ erro: "participante não encontrado nesse grupo" });
+  if (alvo === req.userEmail) return res.status(400).json({ erro: "essa é a sua conta — use a recuperação de senha na tela de login" });
+  let senha = "";
+  for (let i = 0; i < 8; i++) senha += CODE_CHARS[crypto.randomInt(CODE_CHARS.length)];
+  db.users[alvo].senhaHash = hash(senha);
+  for (const [tok, sess] of Object.entries(db.sessions)) if (sess.email === alvo) delete db.sessions[tok];
+  await saveDb(db);
+  console.log(`🔑 senha temporária gerada para "${db.users[alvo].nome}" pelo criador "${db.users[req.userEmail].nome}" (grupo ${req.params.code})`);
+  res.json({ senha, nome: db.users[alvo].nome });
 });
 
 /* só o criador pode tirar alguém do grupo. O participante perde os palpites daquele grupo e

@@ -1,0 +1,407 @@
+{
+  "_aviso": "Palpites combinados fora do app. Cada pessoa precisa ter o MESMO nome que tem no app e ser membro do grupo. Veja README.",
+  "palpites": [
+    {
+      "grupo": "FE8C4M",
+      "pessoa": "Pelé Branco",
+      "jogos": [
+        {
+          "data": "2026-10-23",
+          "casa": "Ipswich Town",
+          "fora": "Nottingham Forest",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Aston Villa",
+          "fora": "Manchester City",
+          "palpite": "2x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Arsenal",
+          "fora": "Everton",
+          "palpite": "2x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Coventry City",
+          "fora": "Fulham",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Chelsea",
+          "fora": "Tottenham",
+          "palpite": "3x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Crystal Palace",
+          "fora": "Newcastle United",
+          "palpite": "1x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Hull City",
+          "fora": "Brentford",
+          "palpite": "1x3"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Liverpool",
+          "fora": "Brighton",
+          "palpite": "3x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Manchester United",
+          "fora": "Bournemouth",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Sunderland",
+          "fora": "Leeds United",
+          "palpite": "1x2"
+        }
+      ]
+    },
+    {
+      "grupo": "FE8C4M",
+      "pessoa": "Ney Profeta",
+      "jogos": [
+        {
+          "data": "2026-10-23",
+          "casa": "Ipswich Town",
+          "fora": "Nottingham Forest",
+          "palpite": "1x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Aston Villa",
+          "fora": "Manchester City",
+          "palpite": "2x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Arsenal",
+          "fora": "Everton",
+          "palpite": "2x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Coventry City",
+          "fora": "Fulham",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Chelsea",
+          "fora": "Tottenham",
+          "palpite": "3x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Crystal Palace",
+          "fora": "Newcastle United",
+          "palpite": "1x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Hull City",
+          "fora": "Brentford",
+          "palpite": "1x3"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Liverpool",
+          "fora": "Brighton",
+          "palpite": "3x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Manchester United",
+          "fora": "Bournemouth",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Sunderland",
+          "fora": "Leeds United",
+          "palpite": "1x2"
+        }
+      ]
+    },
+    {
+      "grupo": "FE8C4M",
+      "pessoa": "Borda-do-gol",
+      "jogos": [
+        {
+          "data": "2026-10-23",
+          "casa": "Ipswich Town",
+          "fora": "Nottingham Forest",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Aston Villa",
+          "fora": "Manchester City",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Arsenal",
+          "fora": "Everton",
+          "palpite": "2x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Coventry City",
+          "fora": "Fulham",
+          "palpite": "1x0"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Chelsea",
+          "fora": "Tottenham",
+          "palpite": "3x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Crystal Palace",
+          "fora": "Newcastle United",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Hull City",
+          "fora": "Brentford",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Liverpool",
+          "fora": "Brighton",
+          "palpite": "2x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Manchester United",
+          "fora": "Bournemouth",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Sunderland",
+          "fora": "Leeds United",
+          "palpite": "0x1"
+        }
+      ]
+    },
+    {
+      "grupo": "FE8C4M",
+      "pessoa": "Rei da Kings",
+      "jogos": [
+        {
+          "data": "2026-10-23",
+          "casa": "Ipswich Town",
+          "fora": "Nottingham Forest",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Aston Villa",
+          "fora": "Manchester City",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Arsenal",
+          "fora": "Everton",
+          "palpite": "3x0"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Coventry City",
+          "fora": "Fulham",
+          "palpite": "1x0"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Chelsea",
+          "fora": "Tottenham",
+          "palpite": "3x0"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Crystal Palace",
+          "fora": "Newcastle United",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Hull City",
+          "fora": "Brentford",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Liverpool",
+          "fora": "Brighton",
+          "palpite": "3x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Manchester United",
+          "fora": "Bournemouth",
+          "palpite": "2x0"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Sunderland",
+          "fora": "Leeds United",
+          "palpite": "1x1"
+        }
+      ]
+    },
+    {
+      "grupo": "FE8C4M",
+      "pessoa": "Cristiano Ronaldo da Madureira",
+      "jogos": [
+        {
+          "data": "2026-10-23",
+          "casa": "Ipswich Town",
+          "fora": "Nottingham Forest",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Aston Villa",
+          "fora": "Manchester City",
+          "palpite": "2x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Arsenal",
+          "fora": "Everton",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Coventry City",
+          "fora": "Fulham",
+          "palpite": "0x0"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Chelsea",
+          "fora": "Tottenham",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Crystal Palace",
+          "fora": "Newcastle United",
+          "palpite": "1x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Hull City",
+          "fora": "Brentford",
+          "palpite": "1x0"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Liverpool",
+          "fora": "Brighton",
+          "palpite": "3x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Manchester United",
+          "fora": "Bournemouth",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Sunderland",
+          "fora": "Leeds United",
+          "palpite": "0x1"
+        }
+      ]
+    },
+    {
+      "grupo": "FE8C4M",
+      "pessoa": "Lipão melhor que K9",
+      "jogos": [
+        {
+          "data": "2026-10-23",
+          "casa": "Ipswich Town",
+          "fora": "Nottingham Forest",
+          "palpite": "1x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Aston Villa",
+          "fora": "Manchester City",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Arsenal",
+          "fora": "Everton",
+          "palpite": "3x0"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Coventry City",
+          "fora": "Fulham",
+          "palpite": "1x1"
+        },
+        {
+          "data": "2026-10-24",
+          "casa": "Chelsea",
+          "fora": "Tottenham",
+          "palpite": "3x0"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Crystal Palace",
+          "fora": "Newcastle United",
+          "palpite": "1x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Hull City",
+          "fora": "Brentford",
+          "palpite": "1x0"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Liverpool",
+          "fora": "Brighton",
+          "palpite": "0x2"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Manchester United",
+          "fora": "Bournemouth",
+          "palpite": "0x1"
+        },
+        {
+          "data": "2026-10-25",
+          "casa": "Sunderland",
+          "fora": "Leeds United",
+          "palpite": "2x0"
+        },
+        {
+          "data": "2026-11-06",
+          "casa": "Everton",
+          "fora": "Coventry City",
+          "palpite": "2x0"
+        }
+      ]
+    }
+  ]
+}

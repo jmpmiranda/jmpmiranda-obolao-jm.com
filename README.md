@@ -134,71 +134,108 @@ Com essas duas variáveis configuradas, o servidor passa a salvar tudo no
 Upstash automaticamente — sem elas, ele continua usando o arquivo local (bom
 pra testar, mas não pra produção).
 
+## Se todo mundo for deslogado e "email ou senha incorretos"
+
+Quase sempre é o **Upstash** suspendendo o banco, não os dados sumindo. O plano
+grátis tem limites por mês (10 GB de banda e 500 mil comandos); passando de um
+deles o banco é **suspenso** ("Database is suspended due to monthly bandwidth
+limit") e o app passa a não enxergar nenhuma conta. Confira em
+**console.upstash.com → seu banco**: o aviso aparece no topo, e o campo
+"Storage" mostra se os dados continuam lá (algumas centenas de KB = salvos).
+Nos logs do Render aparece `ERRO ao ler o banco (nada foi sobrescrito)`.
+
+O que estourava era a **banda**: o banco inteiro (fotos incluídas, ~250 KB) era
+baixado a cada pedido de cada pessoa. Desde esta versão o servidor lê o banco
+**uma vez só** (quando liga) e passa a usar a cópia em memória; só grava quando
+algo muda (juntando várias mudanças numa gravação só, em até 3 s, e gravando
+também ao ser desligado). E se a leitura falhar, o servidor responde
+"instabilidade" em vez de fingir que o banco está vazio — então nunca mais grava
+um banco vazio por cima do real.
+
+Pra reativar um banco suspenso: esperar a virada do mês, ou fazer upgrade
+(pay-as-you-go, com cartão; com esta versão o uso fica perto de zero).
+
 ## Notificações no celular (início, gols e fim de jogo)
 
 Quem ativar em **Configurações → Notificações dos jogos** recebe no celular,
-**mesmo com o app fechado**:
-
-- 🟢 quando o jogo começa
-- ⚽ a cada gol, com o placar e quantos pontos o seu palpite vale naquele momento
-- 🏁 no fim do jogo, com os pontos que você fez
-- ⏰ 1h antes, só se você ainda não palpitou
+**mesmo com o app fechado**: início do jogo, cada gol (com o placar e quantos
+pontos o seu palpite vale naquele momento), o fim de jogo com seus pontos e, 1h
+antes, um aviso se você ainda não palpitou.
 
 **Só dos times que a pessoa segue.** Na aba **📊 Tabela** de cada bolão tem um
 botão "seguir" ao lado de cada time (dá pra seguir vários) e um "seguir tudo"
 em cima. Jogo de time que não é seguido não gera nenhuma notificação — nem o
 lembrete de 1h. Quem ativou as notificações mas ainda não seguiu ninguém não
 recebe nada até escolher. Cada jogo ocupa uma notificação só: a nova substitui
-a anterior, então na tela de bloqueio fica sempre o placar mais recente.
-Cada evento (ex.: "gol, 1x0") é enviado uma única vez.
+a anterior. Cada evento (ex.: "gol, 1x0") é enviado uma única vez.
 
-Como funciona: o servidor já consulta os placares sozinho; quando ele vê que
-um jogo começou, que saiu gol ou que acabou, manda um Web Push pros aparelhos
+Como funciona: o servidor consulta os placares sozinho; quando vê que um jogo
+começou, que saiu gol ou que acabou, manda um Web Push pros aparelhos
 inscritos. As chaves de envio (VAPID) são criadas sozinhas na primeira vez e
-guardadas no Upstash — não precisa configurar nada além do `npm install`
-(que agora instala também o pacote `web-push`).
-
-**Importante**
+guardadas no Upstash.
 
 - **iPhone:** só funciona com o app instalado (Compartilhar → Adicionar à Tela
-  de Início) e iOS 16.4 ou mais novo. Ative as notificações de dentro do app.
+  de Início) e iOS 16.4 ou mais novo.
 - **Render grátis dorme** sem visitas, e servidor dormindo não vê gol. Por isso
-  ele se "cutuca" sozinho a cada 10 min (`/health`) pra ficar acordado — isso
-  usa as ~750h grátis do mês (dá pra deixar um serviço ligado o mês todo).
-  Pra desligar esse comportamento: `MANTER_ACORDADO=0`. Um monitor externo
-  gratuito (UptimeRobot, cron-job.org) batendo em `/health` a cada 5 min
-  também serve de reforço.
-- Um **placar ao vivo fixo na tela de bloqueio** (tipo "Live Activity" do
-  iPhone ou o cartão de partida de apps nativos) só existe em app nativo. O
-  que um app web consegue é essa notificação que se atualiza a cada gol.
+  ele se "cutuca" sozinho a cada 10 min (`/health`). Pra desligar:
+  `MANTER_ACORDADO=0`. Um monitor externo gratuito (UptimeRobot) batendo em
+  `/health` a cada 5 min também serve de reforço.
+- Um placar fixo na tela de bloqueio (tipo "Live Activity" do iPhone) só existe
+  em app nativo; o app web faz uma notificação que se atualiza a cada gol.
 - A permissão é por aparelho: cada celular precisa ativar uma vez.
+
+## Tabela do campeonato e escalações
+
+- A aba **📊 Tabela** mostra a classificação do campeonato do bolão e é
+  atualizada sempre que um jogo termina (e a cada 10 min por garantia).
+- Ao tocar num jogo **ao vivo** (ou encerrado) abre a folha do jogo com o
+  placar, os **palpites do grupo** e as **escalações**.
+- **Escalações:** a football-data.org só inclui escalações nos planos pagos. No
+  plano grátis a folha mostra "escalação ainda não disponível"; se você assinar
+  um plano com escalações, passa a aparecer sozinha.
+
+## Atraso dos placares (plano grátis da football-data.org)
+
+O plano grátis dessa API entrega os placares **com atraso de alguns minutos**
+em relação à TV — isso vem da própria API, não do app. Durante os jogos, uma
+única consulta a cada ~20 s traz as 7 ligas de uma vez; fora dos jogos o
+servidor não gasta consulta nenhuma. Gol em tempo real só no plano pago de
+"livescores" deles.
 
 ## Removendo participantes de um grupo
 
 Só quem **criou** o grupo vê o botão **✕ Remover**: em Configurações →
 Participantes, ou tocando no nome da pessoa na Classificação. A pessoa perde
 os palpites daquele grupo e **não consegue voltar com a senha atual** — se
-quiser deixá-la entrar de novo, troque a senha do grupo (isso libera todo
-mundo que tinha sido removido, que passa a precisar da senha nova).
+quiser deixá-la entrar de novo, troque a senha do grupo.
 
-## Tabela do campeonato e escalações
+## Palpites combinados fora do app (importar-palpites.json)
 
-- A aba **📊 Tabela** mostra a classificação do campeonato do bolão e é
-  atualizada sempre que um jogo termina (e a cada 10 min por garantia).
-- Ao tocar num jogo **ao vivo** (ou encerrado), abre a folha do jogo com o
-  placar, os **palpites do grupo** e as **escalações**.
-- **Escalações:** a football-data.org só inclui escalações nos planos pagos
-  (o "Free + Deep Data" deles). No plano grátis a folha mostra "escalação ainda
-  não disponível". Se você assinar um plano com escalações, passa a aparecer
-  sozinha, sem mudar nada no código.
+Se o app ficou fora do ar e os palpites foram juntados pelo WhatsApp, o arquivo
+`importar-palpites.json` (na raiz do projeto) lista, por grupo e por pessoa, os
+jogos e placares. O servidor lança tudo sozinho:
 
-## Atraso dos placares (plano grátis da football-data.org)
+- acha cada jogo pelo **nome dos times + data** (ignora acento e maiúscula);
+- a pessoa precisa ser **membro do grupo**, com o **mesmo nome** que tem no app;
+- **nunca sobrescreve** um palpite que a pessoa já fez no app, e cada palpite é
+  lançado uma vez só;
+- se o banco ainda estiver indisponível, espera e tenta de novo a cada 3 min;
+- os pontos saem sozinhos, pelo resultado real que o servidor busca na API.
 
-O plano grátis dessa API entrega os placares **com atraso de alguns minutos**
-em relação à TV — isso vem da própria API, não do app. O servidor faz o
-máximo possível dentro dele: durante os jogos, uma única consulta a cada ~20 s
-traz as 7 ligas de uma vez, e fora dos jogos ele não gasta consulta nenhuma.
-Pra ter gol em tempo real, só assinando o plano pago de "livescores" deles.
+O resultado aparece nos logs do Render, numa linha que começa com
+`📥 importação de palpites:`. Isso lança palpite depois do jogo, então só use
+com palpites mandados **antes** do jogo começar (guarde as mensagens).
+
+## Esqueci a senha e não tenho o código de recuperação
+
+- O **criador do grupo** abre Configurações → Participantes e toca em **🔑 Senha**
+  ao lado do nome da pessoa: o app mostra uma senha temporária (8 caracteres).
+  A pessoa entra com o email de sempre + essa senha. Só funciona para membros
+  do grupo de quem pede, nunca para a própria conta, e derruba as sessões abertas
+  dela. Não mexe no código de recuperação.
+- Depois, em **Configurações → Minha senha e código de recuperação**, a pessoa
+  troca a senha por uma que escolha e **gera um novo código de recuperação**
+  (aparece uma única vez — anotar).
 
 ## Instalando como app no celular (PWA, de graça)
 
